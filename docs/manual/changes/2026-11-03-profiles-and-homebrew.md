@@ -2,6 +2,7 @@
 title: Fast profile links, and Homebrew from git
 summary: Links that open in a browser profile are now fast too, profiles work again when macOS hides the profile list, and Homebrew installs and updates this version from its source.
 type: feat
+pr: https://github.com/hanslemm/finicky/pull/2
 ---
 ## For everyone
 
