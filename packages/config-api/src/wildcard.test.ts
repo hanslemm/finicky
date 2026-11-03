@@ -125,3 +125,13 @@ describe("matchWildcard", () => {
     });
   });
 });
+
+describe("matchWildcard cache", () => {
+  it("gives the same result on repeated calls with one pattern", () => {
+    const p = "*.example.com/*";
+    for (let i = 0; i < 3; i++) {
+      expect(matchWildcard(p, "https://a.example.com/x")).toBe(true);
+      expect(matchWildcard(p, "https://example.org/x")).toBe(false);
+    }
+  });
+});

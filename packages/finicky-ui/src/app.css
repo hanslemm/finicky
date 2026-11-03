@@ -1,6 +1,8 @@
 :root {
-  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
-    sans-serif;
+  --font-ui: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+  font-family: var(--font-ui);
   line-height: 1.5;
   font-weight: 400;
 
@@ -14,6 +16,11 @@
   -moz-osx-font-smoothing: grayscale;
 }
 
+/*
+  Text tokens (--text-*, --accent-color) meet WCAG AA (4.5:1) on --bg-primary,
+  --card-bg and --bg-nav in both appearances. The log and toggle tokens are fills and
+  may be brighter. Do not lower text contrast with `opacity`.
+*/
 :root {
   --bg-primary: #1C1C1E;
   --bg-nav: #2C2C2E;
@@ -24,6 +31,9 @@
   --nav-text-secondary: #ADADB3;
   --text-primary: #EBEBF5;
   --text-secondary: #ADADB3;
+  --text-success: #30D158;
+  --text-warning: #FFD60A;
+  --text-error: #FF6961;
   --border-color: rgba(255, 255, 255, 0.15);
   --status-bg: #3A3A3C;
   --log-bg: #2C2C2E;
@@ -32,15 +42,21 @@
   --button-hover: #48484A;
   --input-bg: rgba(0, 0, 0, 0.3);
   --inset-bg: rgba(255, 255, 255, 0.05);
-  --log-error: #FF453A;
+  --log-error: #FF6961;
   --log-warning: #FFD60A;
   --log-success: #30D158;
-  --log-debug: #0A84FF;
+  --log-debug: #64AFFF;
   --nav-active: #0071E3;
   --nav-active-text: #ffffff;
   --nav-hover: rgba(255, 255, 255, 0.08);
-  --accent-color: #0A84FF;
+  --accent-color: #4DA3FF;
+  --accent-fill: #0071E3;
+  --accent-fill-text: #ffffff;
+  --focus-ring: #4DA3FF;
+  --toggle-off: #636366;
+  --toggle-knob: #F2F2F7;
   --toggle-active: #30D158;
+  --toggle-knob-active: #111111;
 }
 
 @media (prefers-color-scheme: light) {
@@ -58,23 +74,32 @@
     --nav-text-secondary: #545458;
     --text-primary: #1C1C1E;
     --text-secondary: #545458;
+    --text-success: #17702F;
+    --text-warning: #9A5200;
+    --text-error: #C4271D;
     --border-color: rgba(0, 0, 0, 0.15);
     --status-bg: #F2F2F7;
     --log-bg: #FFFFFF;
     --log-header-bg: #F2F2F7;
     --button-bg: #FFFFFF;
-    --button-hover: #F2F2F7;
-    --input-bg: rgba(0, 0, 0, 0.04);
+    --button-hover: #E5E5EA;
+    --input-bg: #FFFFFF;
     --inset-bg: rgba(0, 0, 0, 0.03);
-    --log-error: #FF3B30;
-    --log-warning: #FF9F0A;
-    --log-success: #34C759;
-    --log-debug: #007AFF;
-    --nav-active: #007AFF;
+    --log-error: #C4271D;
+    --log-warning: #9A5200;
+    --log-success: #17702F;
+    --log-debug: #0058B8;
+    --nav-active: #0064D2;
     --nav-active-text: #ffffff;
     --nav-hover: rgba(0, 0, 0, 0.06);
-    --accent-color: #007AFF;
+    --accent-color: #0060C7;
+    --accent-fill: #0064D2;
+    --accent-fill-text: #ffffff;
+    --focus-ring: #0064D2;
+    --toggle-off: #C7C7CC;
+    --toggle-knob: #FFFFFF;
     --toggle-active: #34C759;
+    --toggle-knob-active: #FFFFFF;
   }
 }
 
@@ -86,7 +111,7 @@ body {
 }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto;
+  font-family: var(--font-ui);
   background: var(--bg-primary);
   color: var(--text-primary);
   min-width: 800px;
@@ -94,4 +119,34 @@ body {
 
 a {
   color: var(--accent-color);
+}
+
+/* One visible focus ring for every control reached by keyboard. */
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Text for screen readers only. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

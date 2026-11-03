@@ -3,14 +3,16 @@ package browser
 import (
 	_ "embed"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strings"
 	"slices"
+	"strings"
+	"sync"
 
 	"al.essio.dev/pkg/shellescape"
 	"finicky/util"
@@ -22,6 +24,14 @@ var browsersJsonData []byte
 type BrowserResult struct {
 	Browser BrowserConfig `json:"browser"`
 	Error   string        `json:"error"`
+	Matched *MatchInfo    `json:"matched"`
+}
+
+// MatchInfo says which handler decided a URL. RuleIndex is set only when the
+// handler came from the JSON rules file; it is the index of that rule.
+type MatchInfo struct {
+	HandlerIndex int  `json:"handlerIndex"`
+	RuleIndex    *int `json:"ruleIndex,omitempty"`
 }
 
 type BrowserConfig struct {
@@ -31,6 +41,8 @@ type BrowserConfig struct {
 	Profile          string   `json:"profile"`
 	Args             []string `json:"args"`
 	URL              string   `json:"url"`
+	// Matched is nil when no handler matched (the default browser was used).
+	Matched *MatchInfo `json:"-"`
 }
 
 type browserInfo struct {
@@ -70,6 +82,32 @@ func LaunchBrowser(config BrowserConfig, dryRun bool, openInBackgroundByDefault 
 	profileArgs, ok := resolveBrowserProfileArgs(config.Name, config.Profile)
 	hasCustomArgs := len(config.Args) > 0
 
+	// Fast path: ask LaunchServices directly. Custom args can hold `open`
+	// flags (for example "--args"), so only `open` can honour them.
+	if !hasCustomArgs {
+		var nativeArgs []string
+		passURL := true
+		if ok {
+			// Profile switching: launch a new instance with the profile and
+			// the URL as arguments, like `open -n -a App --args <profile> <url>`.
+			nativeArgs = append(append([]string{}, profileArgs...), config.URL)
+			passURL = false
+		}
+		if dryRun {
+			slog.Debug("Would open natively (dry run)", "app", config.Name, "url", config.URL, "background", openInBackground, "args", nativeArgs)
+			return nil
+		}
+		err := openNative(config.Name, config.AppType == "bundleId", config.URL, openInBackground, ok, nativeArgs, passURL)
+		if err == nil {
+			slog.Debug("Opened natively", "app", config.Name, "profileArgs", profileArgs)
+			return nil
+		}
+		if !errors.Is(err, errNativeUnresolved) {
+			return err
+		}
+		slog.Debug("Native open could not resolve app or URL, falling back to open(1)", "app", config.Name)
+	}
+
 	// Add -n flag if profile is used (required for profile switching)
 	if ok {
 		openArgs = append(openArgs, "-n")
@@ -77,7 +115,7 @@ func LaunchBrowser(config BrowserConfig, dryRun bool, openInBackgroundByDefault 
 
 	// Add --args if we have profile args or custom args
 	if ok || hasCustomArgs {
-		if ! slices.Contains(config.Args, "--args") {
+		if !slices.Contains(config.Args, "--args") {
 			openArgs = append(openArgs, "--args")
 		}
 		// Add profile arguments first if present
@@ -147,27 +185,25 @@ func LaunchBrowser(config BrowserConfig, dryRun bool, openInBackgroundByDefault 
 	return nil
 }
 
+// knownBrowsers parses the embedded browsers.json once.
+var knownBrowsers = sync.OnceValue(func() []browserInfo {
+	var list []browserInfo
+	if err := json.Unmarshal(browsersJsonData, &list); err != nil {
+		slog.Error("Error parsing browsers.json", "error", err)
+	}
+	return list
+})
+
 func resolveBrowserProfileArgs(identifier string, profile string) ([]string, bool) {
-	var browsersJson []browserInfo
-	if err := json.Unmarshal(browsersJsonData, &browsersJson); err != nil {
-		slog.Info("Error parsing browsers.json", "error", err)
+	if profile == "" {
 		return nil, false
 	}
-
-	// Try to find matching browser by bundle ID
-	var matchedBrowser *browserInfo
-	for _, browser := range browsersJson {
-		if browser.ID == identifier || browser.AppName == identifier {
-			matchedBrowser = &browser
-			break
-		}
-	}
-
+	matchedBrowser := findBrowser(identifier)
 	if matchedBrowser == nil {
 		return nil, false
 	}
 
-	slog.Debug("Browser found in browsers.json", "identifier", identifier, "type", matchedBrowser.Type)
+	slog.Debug("Browser profile store found", "identifier", identifier, "type", matchedBrowser.Type)
 
 	if profile != "" {
 		switch matchedBrowser.Type {
@@ -339,22 +375,11 @@ func parseProfiles(localStatePath string, profile string) (string, bool) {
 }
 
 // GetProfilesForBrowser returns available profile names for a given browser app name or bundle ID.
-// Returns empty slice if browser not in browsers.json, not supported, or profile files are unreadable.
+// It knows the browsers in browsers.json and discovers other Chromium- and
+// Firefox-based browsers (see discover.go). Returns an empty slice when the
+// browser has no profile store or its profile file is unreadable.
 func GetProfilesForBrowser(identifier string) []string {
-	var browsersJson []browserInfo
-	if err := json.Unmarshal(browsersJsonData, &browsersJson); err != nil {
-		slog.Info("Error parsing browsers.json", "error", err)
-		return []string{}
-	}
-
-	var matchedBrowser *browserInfo
-	for i := range browsersJson {
-		if browsersJson[i].ID == identifier || browsersJson[i].AppName == identifier {
-			matchedBrowser = &browsersJson[i]
-			break
-		}
-	}
-
+	matchedBrowser := findBrowser(identifier)
 	if matchedBrowser == nil {
 		return []string{}
 	}

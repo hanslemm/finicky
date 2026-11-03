@@ -53,10 +53,11 @@ func (r Rule) MarshalJSON() ([]byte, error) {
 }
 
 type Options struct {
-	KeepRunning     *bool `json:"keepRunning,omitempty"`
-	HideIcon        *bool `json:"hideIcon,omitempty"`
-	LogRequests     *bool `json:"logRequests,omitempty"`
-	CheckForUpdates *bool `json:"checkForUpdates,omitempty"`
+	KeepRunning      *bool `json:"keepRunning,omitempty"`
+	HideIcon         *bool `json:"hideIcon,omitempty"`
+	LogRequests      *bool `json:"logRequests,omitempty"`
+	CheckForUpdates  *bool `json:"checkForUpdates,omitempty"`
+	ResolveShortUrls *bool `json:"resolveShortUrls,omitempty"`
 }
 
 type RulesFile struct {
@@ -117,6 +118,16 @@ func LoadFromPath(path string) (RulesFile, error) {
 	return rf, nil
 }
 
+// MergeOptions returns rf with its Options taken from existing when rf has
+// none. A save payload without "options" (the rules editor sends only rules)
+// must not erase the options the Preferences page stored.
+func MergeOptions(rf RulesFile, existing RulesFile) RulesFile {
+	if rf.Options == nil {
+		rf.Options = existing.Options
+	}
+	return rf
+}
+
 // Save writes the rules file to the default path, creating the directory if needed.
 func Save(rf RulesFile) error {
 	path, err := GetPath()
@@ -141,10 +152,12 @@ func SaveToPath(rf RulesFile, path string) error {
 }
 
 // ToJSHandlers converts rules to the handler format expected by finickyConfigAPI.
-// Rules with an empty match or browser are skipped.
+// Rules with an empty match or browser are skipped. Each handler carries
+// "ruleIndex", the index of its rule in the rules file, so a match can be
+// traced back to the rule the user sees.
 func ToJSHandlers(rules []Rule) []map[string]interface{} {
 	handlers := make([]map[string]interface{}, 0, len(rules))
-	for _, r := range rules {
+	for i, r := range rules {
 		// Filter out empty patterns
 		matches := make([]string, 0, len(r.Match))
 		for _, m := range r.Match {
@@ -168,8 +181,9 @@ func ToJSHandlers(rules []Rule) []map[string]interface{} {
 			browser = r.Browser
 		}
 		handlers = append(handlers, map[string]interface{}{
-			"match":   matchVal,
-			"browser": browser,
+			"match":     matchVal,
+			"browser":   browser,
+			"ruleIndex": i,
 		})
 	}
 	return handlers
@@ -217,6 +231,9 @@ func ToJSConfigScript(rf RulesFile, namespace string) (string, error) {
 	}
 	if rf.Options.CheckForUpdates != nil {
 		opts["checkForUpdates"] = *rf.Options.CheckForUpdates
+	}
+	if rf.Options.ResolveShortUrls != nil {
+		opts["resolveShortUrls"] = *rf.Options.ResolveShortUrls
 	}
 
 	optsJSON, err := json.Marshal(opts)

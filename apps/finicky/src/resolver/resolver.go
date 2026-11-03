@@ -10,6 +10,8 @@ import (
 	"finicky/config"
 	"finicky/rules"
 	"finicky/shorturl"
+
+	"github.com/dop251/goja"
 )
 
 // OpenerInfo describes the process that triggered the URL open.
@@ -23,6 +25,27 @@ type OpenerInfo struct {
 var (
 	cachedRulesMu   sync.Mutex
 	cachedRulesFile rules.RulesFile
+	// cachedRulesGen changes each time the rules change, so a VM can tell
+	// whether its merged config is stale. It starts at 1 so that 0 never
+	// matches a fresh VM.
+	cachedRulesGen uint64 = 1
+)
+
+// Scripts run for each URL. Compiled once; a goja.Program can run on any
+// runtime.
+var (
+	openURLProgram = goja.MustCompile("openUrl",
+		"finickyConfigAPI.openUrl(url, opener, originalUrl, finalConfig, true)", false)
+	openMergedURLProgram = goja.MustCompile("openMergedUrl",
+		"finickyConfigAPI.openUrl(url, opener, originalUrl, _mergedConfig, true)", false)
+	buildMergedProgram = goja.MustCompile("buildMerged", `(function () {
+		var merged = Object.assign({}, finalConfig, {
+			handlers: (finalConfig.handlers || []).concat(_jsonHandlers)
+		});
+		if (finickyConfigAPI.validateConfig(merged)) { _mergedConfig = merged; return true; }
+		_mergedConfig = finalConfig;
+		return false;
+	})()`, false)
 )
 
 // SetCachedRules stores a snapshot of the JSON rules so evaluateURL can use
@@ -30,13 +53,35 @@ var (
 func SetCachedRules(rf rules.RulesFile) {
 	cachedRulesMu.Lock()
 	cachedRulesFile = rf
+	cachedRulesGen++
 	cachedRulesMu.Unlock()
 }
 
-func getCachedRules() rules.RulesFile {
+func getCachedRules() (rules.RulesFile, uint64) {
 	cachedRulesMu.Lock()
 	defer cachedRulesMu.Unlock()
-	return cachedRulesFile
+	return cachedRulesFile, cachedRulesGen
+}
+
+// ensureMergedConfig makes the _mergedConfig JS global hold the JS config
+// plus the current JSON rules (as lower-priority handlers). It rebuilds and
+// validates only when the rules or the VM changed, not on every URL.
+func ensureMergedConfig(vm *config.VM) error {
+	rf, gen := getCachedRules()
+	if built, ok := vm.MergedRulesGen(); ok && built == gen {
+		return nil
+	}
+	runtime := vm.Runtime()
+	runtime.Set("_jsonHandlers", rules.ToJSHandlers(rf.Rules))
+	valid, err := runtime.RunProgram(buildMergedProgram)
+	if err != nil {
+		return fmt.Errorf("failed to merge JSON rules into config: %v", err)
+	}
+	if !valid.ToBoolean() {
+		slog.Warn("JSON rules are invalid, using the JS config without them")
+	}
+	vm.SetMergedRulesGen(gen)
+	return nil
 }
 
 // ResolveURL determines which browser to use for the given URL.
@@ -68,13 +113,15 @@ func mergeBackground(fromConfig *bool, requested bool) *bool {
 func evaluateURL(vm *config.VM, url string, opener *OpenerInfo) (*browser.BrowserConfig, error) {
 	runtime := vm.Runtime()
 
-	resolvedURL, err := shorturl.ResolveURL(url)
 	runtime.Set("originalUrl", url)
-	if err != nil {
-		slog.Info("Failed to resolve short URL", "error", err, "url", url, "using", resolvedURL)
+	if vm.GetAllConfigOptions().ResolveShortURLs {
+		resolvedURL, err := shorturl.ResolveURL(url)
+		if err != nil {
+			slog.Info("Failed to resolve short URL", "error", err, "url", url, "using", resolvedURL)
+		}
+		url = resolvedURL
 	}
-	url = resolvedURL
-	runtime.Set("url", resolvedURL)
+	runtime.Set("url", url)
 
 	if opener != nil {
 		openerMap := map[string]interface{}{
@@ -92,19 +139,18 @@ func evaluateURL(vm *config.VM, url string, opener *OpenerInfo) (*browser.Browse
 		slog.Debug("No opener detected")
 	}
 
-	// When there is a JS config, append cached JSON rules as lower-priority handlers.
-	var evalScript string
+	// The config was validated when the VM was built, so openUrl skips the
+	// per-URL validation. With a JS config, JSON rules are appended as
+	// lower-priority handlers (merged and validated once per rules change).
+	program := openURLProgram
 	if vm.IsJSConfig() {
-		rf := getCachedRules()
-		runtime.Set("_jsonHandlers", rules.ToJSHandlers(rf.Rules))
-		evalScript = `finickyConfigAPI.openUrl(url, opener, originalUrl, Object.assign({}, finalConfig, {
-			handlers: (finalConfig.handlers || []).concat(_jsonHandlers)
-		}))`
-	} else {
-		evalScript = "finickyConfigAPI.openUrl(url, opener, originalUrl, finalConfig)"
+		if err := ensureMergedConfig(vm); err != nil {
+			return nil, err
+		}
+		program = openMergedURLProgram
 	}
 
-	openResult, err := runtime.RunString(evalScript)
+	openResult, err := runtime.RunProgram(program)
 	if err != nil {
 		return nil, fmt.Errorf("failed to evaluate URL in config: %v", err)
 	}
@@ -132,6 +178,7 @@ func evaluateURL(vm *config.VM, url string, opener *OpenerInfo) (*browser.Browse
 	if browserResult.Error != "" {
 		resultErr = fmt.Errorf("%s", browserResult.Error)
 	}
+	browserResult.Browser.Matched = browserResult.Matched
 	return &browserResult.Browser, resultErr
 }
 
@@ -145,4 +192,3 @@ func defaultBrowserConfig(urlStr string, openInBackground bool) *browser.Browser
 		URL:              urlStr,
 	}
 }
-

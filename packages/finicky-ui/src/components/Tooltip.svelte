@@ -10,11 +10,15 @@
     text: string;
     block?: boolean;
   } = $props();
+
+  const id = `tip-${Math.random().toString(36).slice(2, 9)}`;
 </script>
 
-<span class="tooltip-anchor" class:block>
+<!-- The anchor takes focus so keyboard users can read the tip. -->
+<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+<span class="tooltip-anchor" class:block tabindex="0" aria-describedby={id}>
   {@render children()}
-  <span class="tooltip-text">{text}</span>
+  <span class="tooltip-text" role="tooltip" {id}>{text}</span>
 </span>
 
 <style>
@@ -48,7 +52,9 @@
     z-index: 100;
   }
 
-  .tooltip-anchor:hover .tooltip-text {
+  .tooltip-anchor:hover .tooltip-text,
+  .tooltip-anchor:focus-visible .tooltip-text,
+  .tooltip-anchor:focus-within .tooltip-text {
     display: block;
   }
 </style>

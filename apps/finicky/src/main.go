@@ -23,11 +23,11 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
-
-	"github.com/dop251/goja"
 )
 
 //go:embed assets/finickyConfigAPI.js
@@ -51,8 +51,18 @@ type ConfigInfo struct {
 	ConfigPath     string
 }
 
-var urlListener chan URLInfo = make(chan URLInfo)
+// urlListener is buffered so the Cocoa main thread, which sends on it from
+// the Apple-event handler, does not wait while a previous URL is resolved.
+var urlListener chan URLInfo = make(chan URLInfo, 16)
 var windowClosed chan struct{} = make(chan struct{})
+
+// jobs runs work on the event-loop goroutine. The goja runtime inside vm is
+// not safe for concurrent use, so every VM access (URL resolution, test URLs,
+// VM rebuilds) goes through the event loop.
+var jobs chan func() = make(chan func(), 16)
+
+// vm is read and written only on the event-loop goroutine (and in main
+// before the loop starts).
 var vm *config.VM
 
 var forceWindowOpen bool = false
@@ -60,9 +70,29 @@ var queueWindowOpen chan bool = make(chan bool)
 var lastError error
 var dryRun bool = false
 var skipJSConfig bool = false
-var updateInfo UpdateInfo
-var configInfo *ConfigInfo
+
+// configInfo is written on the event loop and read on the Cocoa main thread
+// (menu "Edit config"), so it is an atomic pointer.
+var configInfo atomic.Pointer[ConfigInfo]
 var shouldKeepRunning bool = true
+
+// recentLinks holds the last links Finicky opened, newest first, for the
+// settings window. Memory only: never written to disk. Event loop only.
+const maxRecentLinks = 30
+
+type recentLink struct {
+	ID        uint64 `json:"id"` // unique in this process: two links can share a URL and second
+	Time      string `json:"time"`
+	URL       string `json:"url"`
+	Opener    string `json:"opener,omitempty"`
+	Browser   string `json:"browser"`
+	Profile   string `json:"profile,omitempty"`
+	Source    string `json:"source"` // "rule", "js", "default" or "error"
+	RuleIndex *int   `json:"ruleIndex,omitempty"`
+}
+
+var recentLinks []recentLink
+var recentLinkSeq uint64
 
 func main() {
 	startTime := time.Now()
@@ -105,6 +135,7 @@ func main() {
 	slog.Debug("Build info", "buildDate", buildDate, "commitHash", commitHash)
 
 	go func() {
+		defer reportDefaultBrowser()
 		is_default_browser, err := setDefaultBrowser()
 		if err != nil {
 			slog.Debug("Failed checking if we are the default browser", "error", err)
@@ -130,40 +161,25 @@ func main() {
 
 	slog.Debug("VM setup complete", "duration", fmt.Sprintf("%.2fms", float64(time.Since(startTime).Microseconds())/1000))
 
-	go checkForUpdates()
+	go checkForUpdates(vm.GetAllConfigOptions().CheckForUpdates)
 
-	// Set up test URL handler
+	// UI handlers run on the Cocoa main thread; hand the work to the event loop.
 	window.TestUrlHandler = func(url string) {
-		go TestURLInternal(url)
+		jobs <- func() { TestURLInternal(url) }
 	}
 
-	// Set up rules save handler.
 	// When there is no JS config, rebuild the VM from the updated rules.
-	// When there is a JS config, JSON rules are loaded fresh in evaluateURL — nothing to do.
+	// When there is a JS config, the resolver merges the new JSON rules on the
+	// next URL — nothing else to do.
 	window.SaveRulesHandler = func(rf rules.RulesFile) {
-		slog.Debug("Rules updated", "count", len(rf.Rules))
-		resolver.SetCachedRules(rf)
-		if vm == nil || !vm.IsJSConfig() {
-			if rf.DefaultBrowser == "" && len(rf.Rules) == 0 && rf.Options == nil {
-				vm = nil
-				return
-			}
-			script, err := rules.ToJSConfigScript(rf, namespace)
-			if err != nil {
-				slog.Error("Failed to generate config from rules", "error", err)
-				return
-			}
-			newVM, err := config.NewFromScript(finickyConfigAPIJS, namespace, script)
-			if err != nil {
-				slog.Error("Failed to rebuild VM from rules", "error", err)
-				return
-			}
-			vm = newVM
-			if vm != nil {
-				shouldKeepRunning = vm.GetAllConfigOptions().KeepRunning
-				go checkForUpdates()
-			}
-		}
+		jobs <- func() { applySavedRules(rf, namespace) }
+	}
+
+	window.MakeDefaultHandler = func() { go makeDefaultBrowser() }
+	window.OpenConfigHandler = func(reveal bool) { go openConfigFile(reveal) }
+	window.WindowShownHandler = func() {
+		go reportDefaultBrowser()
+		jobs <- func() { sendRecentLinks() }
 	}
 
 	const oneDay = 24 * time.Hour
@@ -183,6 +199,9 @@ func main() {
 		slog.Info("Listening for events...")
 		for {
 			select {
+			case job := <-jobs:
+				job()
+
 			case urlInfo := <-urlListener:
 				startTime := time.Now()
 
@@ -196,6 +215,7 @@ func main() {
 				} else {
 					lastError = nil
 				}
+				recordRecentLink(url, urlInfo.Opener, config, err)
 				if launchErr := browser.LaunchBrowser(*config, dryRun, urlInfo.OpenInBackground); launchErr != nil {
 					slog.Error("Failed to start browser", "error", launchErr)
 				}
@@ -220,10 +240,9 @@ func main() {
 					C.SetStatusItemError(false)
 				}
 				slog.Debug("VM refresh complete", "duration", fmt.Sprintf("%.2fms", float64(time.Since(startTime).Microseconds())/1000))
-				if vm != nil {
-					shouldKeepRunning = vm.GetAllConfigOptions().KeepRunning
-					go checkForUpdates()
-				}
+				opts := vm.GetAllConfigOptions()
+				shouldKeepRunning = opts.KeepRunning
+				go checkForUpdates(opts.CheckForUpdates)
 
 			case shouldShowWindow := <-queueWindowOpen:
 				if !showingWindow && shouldShowWindow {
@@ -233,7 +252,7 @@ func main() {
 				}
 
 			case <-updateChan:
-				go checkForUpdates()
+				go checkForUpdates(vm.GetAllConfigOptions().CheckForUpdates)
 				updateChan = time.After(oneDay)
 
 			case <-windowClosed:
@@ -302,7 +321,37 @@ func HandleURL(url *C.char, name *C.char, bundleId *C.char, path *C.char, window
 //export TestURL
 func TestURL(url *C.char) {
 	urlString := C.GoString(url)
-	TestURLInternal(urlString)
+	jobs <- func() { TestURLInternal(urlString) }
+}
+
+// applySavedRules runs on the event loop after the UI saved rules.json.
+func applySavedRules(rf rules.RulesFile, namespace string) {
+	slog.Debug("Rules updated", "count", len(rf.Rules))
+	resolver.SetCachedRules(rf)
+	if vm != nil && vm.IsJSConfig() {
+		return
+	}
+	if rf.DefaultBrowser == "" && len(rf.Rules) == 0 && rf.Options == nil {
+		vm = nil
+		return
+	}
+	script, err := rules.ToJSConfigScript(rf, namespace)
+	if err != nil {
+		slog.Error("Failed to generate config from rules", "error", err)
+		return
+	}
+	newVM, err := config.NewFromScript(finickyConfigAPIJS, namespace, script)
+	if err != nil {
+		slog.Error("Failed to rebuild VM from rules", "error", err)
+		return
+	}
+	vm = newVM
+	opts := vm.GetAllConfigOptions()
+	shouldKeepRunning = opts.KeepRunning
+	if err := logger.SetupFile(opts.LogRequests); err != nil {
+		slog.Warn("Failed to setup file logging", "error", err)
+	}
+	go checkForUpdates(opts.CheckForUpdates)
 }
 
 func TestURLInternal(urlString string) {
@@ -317,13 +366,115 @@ func TestURLInternal(urlString string) {
 		return
 	}
 
+	source, ruleIndex := matchSource(config, nil)
 	window.SendMessageToWebView("testUrlResult", map[string]interface{}{
 		"url":              config.URL,
 		"browser":          config.Name,
 		"openInBackground": config.OpenInBackground,
 		"profile":          config.Profile,
 		"args":             config.Args,
+		"source":           source,
+		"ruleIndex":        ruleIndex,
+		"handlerIndex":     handlerIndex(config),
 	})
+}
+
+// matchSource says what decided a URL: a JSON rule ("rule", with its index),
+// a JS config handler ("js"), the default browser ("default"), or an error.
+func matchSource(config *browser.BrowserConfig, err error) (string, *int) {
+	switch {
+	case err != nil:
+		return "error", nil
+	case config.Matched == nil:
+		return "default", nil
+	case config.Matched.RuleIndex != nil:
+		return "rule", config.Matched.RuleIndex
+	default:
+		return "js", nil
+	}
+}
+
+func handlerIndex(config *browser.BrowserConfig) *int {
+	if config.Matched == nil {
+		return nil
+	}
+	return &config.Matched.HandlerIndex
+}
+
+// recordRecentLink runs on the event loop after each URL.
+func recordRecentLink(url string, opener *resolver.OpenerInfo, config *browser.BrowserConfig, err error) {
+	source, ruleIndex := matchSource(config, err)
+	recentLinkSeq++
+	link := recentLink{
+		ID:        recentLinkSeq,
+		Time:      time.Now().Format(time.RFC3339),
+		URL:       url,
+		Browser:   config.Name,
+		Profile:   config.Profile,
+		Source:    source,
+		RuleIndex: ruleIndex,
+	}
+	if opener != nil {
+		link.Opener = opener.Name
+	}
+	recentLinks = append([]recentLink{link}, recentLinks...)
+	if len(recentLinks) > maxRecentLinks {
+		recentLinks = recentLinks[:maxRecentLinks]
+	}
+	sendRecentLinks()
+}
+
+func sendRecentLinks() {
+	list := make([]recentLink, len(recentLinks))
+	copy(list, recentLinks)
+	window.SendMessageToWebView("recentLinks", list)
+}
+
+// openConfigFile opens the active config (JS file or rules.json) in its
+// default app, or shows it in Finder. The path comes from Finicky itself, never
+// from the window.
+func openConfigFile(reveal bool) {
+	ci := configInfo.Load()
+	path := ""
+	if ci != nil {
+		path = ci.ConfigPath
+	}
+	if path == "" {
+		path, _ = rules.GetPath()
+	}
+	if _, err := os.Stat(path); err != nil {
+		slog.Warn("No config file to open", "path", path)
+		return
+	}
+	args := []string{path}
+	if reveal {
+		args = []string{"-R", path}
+	}
+	if err := exec.Command("open", args...).Run(); err != nil {
+		slog.Warn("Failed to open config file", "path", path, "error", err)
+	}
+}
+
+// reportDefaultBrowser tells the window whether Finicky handles http, https
+// and finicky links. It only reads Launch Services, so any goroutine may call it.
+func reportDefaultBrowser() {
+	isDefault, _ := isDefaultBrowser()
+	window.SendMessageToWebView("defaultBrowserStatus", map[string]interface{}{"isDefault": isDefault})
+}
+
+// makeDefaultBrowser asks macOS to make Finicky the default browser. macOS
+// shows a confirmation dialog, so poll the result for up to 30 s.
+func makeDefaultBrowser() {
+	if _, err := setDefaultBrowser(); err != nil {
+		slog.Warn("Failed to set Finicky as default browser", "error", err)
+	}
+	for i := 0; i < 30; i++ {
+		time.Sleep(time.Second)
+		if isDefault, _ := isDefaultBrowser(); isDefault {
+			break
+		}
+	}
+	reportDefaultBrowser()
 }
 
 func handleFatalError(errorMessage string) {
@@ -350,31 +501,27 @@ func ShowConfigWindow() {
 
 //export WindowDidClose
 func WindowDidClose() {
+	window.MarkClosed()
 	windowClosed <- struct{}{}
 }
 
 //export GetCurrentConfigPath
 func GetCurrentConfigPath() *C.char {
-	if configInfo != nil && configInfo.ConfigPath != "" {
-		cPath := C.CString(configInfo.ConfigPath)
-		return cPath
-	} else {
-		return nil
+	if ci := configInfo.Load(); ci != nil && ci.ConfigPath != "" {
+		return C.CString(ci.ConfigPath)
 	}
+	return nil
 }
 
-func checkForUpdates() {
-	var runtime *goja.Runtime
-	if vm != nil {
-		runtime = vm.Runtime()
-	}
-
-	releaseInfo, updateCheckEnabled, err := version.CheckForUpdatesIfEnabled(runtime)
+// checkForUpdates runs on its own goroutine. It must not touch vm: the caller
+// passes the checkForUpdates option in.
+func checkForUpdates(enabled bool) {
+	releaseInfo, updateCheckEnabled, err := version.CheckForUpdatesIfEnabled(enabled)
 	if err != nil {
 		slog.Error("Error checking for updates", "error", err)
 	}
 
-	updateInfo = UpdateInfo{
+	updateInfo := UpdateInfo{
 		ReleaseInfo:        releaseInfo,
 		UpdateCheckEnabled: updateCheckEnabled,
 	}
@@ -402,8 +549,9 @@ func checkForUpdates() {
 	}
 }
 
+// tearDown exits at once. The update check already ran at start (at most
+// once a day); waiting for the network here only delayed the exit.
 func tearDown() {
-	checkForUpdates()
 	slog.Info("Exiting...")
 	os.Exit(0)
 }
@@ -467,30 +615,29 @@ func setupVM(cfw *config.ConfigFileWatcher, namespace string) (*config.VM, error
 		return nil, nil
 	}
 
-	cs := newVM.GetConfigState()
-	if cs != nil {
-		configInfo = &ConfigInfo{
-			Handlers:       cs.Handlers,
-			Rewrites:       cs.Rewrites,
-			DefaultBrowser: cs.DefaultBrowser,
-			ConfigPath:     configPath,
-		}
+	ci := &ConfigInfo{ConfigPath: configPath}
+	if cs := newVM.GetConfigState(); cs != nil {
+		ci.Handlers = cs.Handlers
+		ci.Rewrites = cs.Rewrites
+		ci.DefaultBrowser = cs.DefaultBrowser
 	}
+	configInfo.Store(ci)
 
 	opts := newVM.GetAllConfigOptions()
 	logRequests = opts.LogRequests
 
 	window.SendMessageToWebView("config", map[string]interface{}{
-		"handlers":       configInfo.Handlers,
-		"rewrites":       configInfo.Rewrites,
-		"defaultBrowser": configInfo.DefaultBrowser,
-		"configPath":     util.ShortenPath(configInfo.ConfigPath),
+		"handlers":       ci.Handlers,
+		"rewrites":       ci.Rewrites,
+		"defaultBrowser": ci.DefaultBrowser,
+		"configPath":     util.ShortenPath(ci.ConfigPath),
 		"isJSConfig":     newVM.IsJSConfig(),
 		"options": map[string]interface{}{
-			"keepRunning":     opts.KeepRunning,
-			"hideIcon":        opts.HideIcon,
-			"logRequests":     opts.LogRequests,
-			"checkForUpdates": opts.CheckForUpdates,
+			"keepRunning":      opts.KeepRunning,
+			"hideIcon":         opts.HideIcon,
+			"logRequests":      opts.LogRequests,
+			"checkForUpdates":  opts.CheckForUpdates,
+			"resolveShortUrls": opts.ResolveShortURLs,
 		},
 	})
 

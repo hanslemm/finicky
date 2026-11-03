@@ -26,23 +26,84 @@ import (
 )
 
 var (
-	messageQueue     []string
-	queueMutex       sync.Mutex
-	windowReady      bool
 	TestUrlHandler   func(string)
 	SaveRulesHandler func(rules.RulesFile)
+	// MakeDefaultHandler asks macOS to make Finicky the default browser.
+	MakeDefaultHandler func()
+	// WindowShownHandler runs each time the window opens, to refresh state
+	// that can change while it is closed (for example the default browser).
+	WindowShownHandler func()
+	// OpenConfigHandler opens the active config file, or shows it in Finder
+	// when reveal is true.
+	OpenConfigHandler func(reveal bool)
+)
+
+// Message buffering for the UI window.
+//
+// The window is closed most of the time, and its web view is destroyed on
+// close. So the Go side keeps what a freshly opened window needs, in bounded
+// memory:
+//   - stateMessages: the latest message of each state type (config, version, …)
+//   - logHistory:    the last maxLogHistory log lines
+//   - pending:       other messages sent while the page was loading
+//
+// All of it is replayed when the page reports ready.
+const (
+	maxLogHistory = 1000
+	maxPending    = 100
+)
+
+var stateTypes = map[string]bool{
+	"config":               true,
+	"version":              true,
+	"updateInfo":           true,
+	"buildInfo":            true,
+	"recentLinks":          true,
+	"defaultBrowserStatus": true,
+}
+
+var (
+	queueMutex    sync.Mutex
+	windowReady   bool
+	stateOrder    []string
+	stateMessages = map[string]string{}
+	logHistory    []string // ring buffer once full
+	logHead       int      // index of the oldest entry when full
+	pending       []string
 )
 
 //export WindowIsReady
 func WindowIsReady() {
 	queueMutex.Lock()
+	defer queueMutex.Unlock()
 	windowReady = true
-	// Process any queued messages
-	for _, message := range messageQueue {
-		sendMessageToWebViewInternal(message)
+	for _, t := range stateOrder {
+		sendMessageToWebViewInternal(stateMessages[t])
 	}
-	messageQueue = nil
+	for i := 0; i < len(logHistory); i++ {
+		sendMessageToWebViewInternal(logHistory[(logHead+i)%len(logHistory)])
+	}
+	for _, m := range pending {
+		sendMessageToWebViewInternal(m)
+	}
+	pending = nil
+}
+
+// MarkClosed records that the window closed. Its web view is gone, so
+// messages are buffered again until the next window reports ready.
+func MarkClosed() {
+	queueMutex.Lock()
+	windowReady = false
 	queueMutex.Unlock()
+}
+
+func appendLog(msg string) {
+	if len(logHistory) < maxLogHistory {
+		logHistory = append(logHistory, msg)
+		return
+	}
+	logHistory[logHead] = msg
+	logHead = (logHead + 1) % maxLogHistory
 }
 
 func sendMessageToWebViewInternal(message string) {
@@ -64,18 +125,36 @@ func SendMessageToWebView(messageType string, message interface{}) {
 		slog.Error("Error marshaling message", "error", err)
 		return
 	}
+	msg := string(jsonBytes)
 
 	queueMutex.Lock()
 	defer queueMutex.Unlock()
 
+	switch {
+	case stateTypes[messageType]:
+		if _, seen := stateMessages[messageType]; !seen {
+			stateOrder = append(stateOrder, messageType)
+		}
+		stateMessages[messageType] = msg
+	case messageType == "log":
+		appendLog(msg)
+	case !windowReady:
+		if len(pending) >= maxPending {
+			pending = pending[1:]
+		}
+		pending = append(pending, msg)
+	}
+
 	if windowReady {
-		sendMessageToWebViewInternal(string(jsonBytes))
-	} else {
-		messageQueue = append(messageQueue, string(jsonBytes))
+		sendMessageToWebViewInternal(msg)
 	}
 }
 
-func init() {
+var loadAssetsOnce sync.Once
+
+// loadAssets hands the embedded UI files to the Objective-C side. It runs on
+// the first window open, not at process start: most runs never show the window.
+func loadAssets() {
 	// Load HTML content
 	html, err := assets.GetHTML()
 	if err != nil {
@@ -129,7 +208,11 @@ func init() {
 }
 
 func ShowWindow() {
+	loadAssetsOnce.Do(loadAssets)
 	C.ShowWindow()
+	if WindowShownHandler != nil {
+		WindowShownHandler()
+	}
 	SendBuildInfo()
 }
 
@@ -172,6 +255,14 @@ func HandleWebViewMessage(messagePtr *C.char) {
 		handleGetInstalledBrowsers()
 	case "getBrowserProfiles":
 		handleGetBrowserProfiles(msg)
+	case "makeDefaultBrowser":
+		if MakeDefaultHandler != nil {
+			MakeDefaultHandler()
+		}
+	case "openConfig", "revealConfig":
+		if OpenConfigHandler != nil {
+			OpenConfigHandler(messageType == "revealConfig")
+		}
 	default:
 		slog.Debug("Unknown message type", "type", messageType)
 	}
@@ -237,6 +328,10 @@ func handleSaveRules(msg map[string]interface{}) {
 	if err := json.Unmarshal(payloadBytes, &rf); err != nil {
 		slog.Error("Failed to parse saveRules payload", "error", err)
 		return
+	}
+
+	if existing, loadErr := rules.Load(); loadErr == nil {
+		rf = rules.MergeOptions(rf, existing)
 	}
 
 	if err := rules.Save(rf); err != nil {

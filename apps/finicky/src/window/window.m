@@ -6,7 +6,9 @@ static NSMutableDictionary* fileContents = nil;
 
 void SetHTMLContent(const char* content) {
     if (content) {
-        htmlContent = [NSString stringWithUTF8String:content];
+        // No ARC: keep our own reference, the string must outlive this call.
+        [htmlContent release];
+        htmlContent = [[NSString alloc] initWithUTF8String:content];
     }
 }
 
@@ -20,9 +22,8 @@ void SetFileContent(const char* path, const char* content) {
             // For PNG files, use SetFileContentWithLength instead
             SetFileContentWithLength(path, content, strlen(content));
         } else {
-            // For text files, store as string
-            NSString* contentStr = [NSString stringWithUTF8String:content];
-            fileContents[pathStr] = contentStr;
+            // Store text as UTF-8 bytes: the scheme handler serves bytes anyway.
+            fileContents[pathStr] = [NSData dataWithBytes:content length:strlen(content)];
         }
     }
 }
@@ -73,13 +74,28 @@ void SetFileContentWithLength(const char* path, const char* content, size_t leng
     [window setTitle:@"Finicky"];
     [window center];
     [window setReleasedWhenClosed:NO];
-    [window setBackgroundColor:[NSColor colorWithCalibratedWhite:0.1 alpha:1.0]];
+    // Follow the system appearance (light or dark), like the page does.
+    [window setBackgroundColor:[NSColor windowBackgroundColor]];
 
     // Set minimum window size
     [window setMinSize:NSMakeSize(800, 500)];
     [window setMaxSize:NSMakeSize(1200, 900)];
 
-    // Configure WKWebView
+    // Window close notification: the web view is destroyed on close.
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                         selector:@selector(windowWillClose:)
+                                             name:NSWindowWillCloseNotification
+                                           object:window];
+
+    [self createWebView];
+}
+
+// The web view (and its WebContent process) exists only while the window is
+// open. Finicky spends most of its life with no window, so this saves the
+// WebKit processes' memory.
+- (void)createWebView {
+    if (webView) return;
+
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
     [config.userContentController addScriptMessageHandler:self name:@"finicky"];
     [config setURLSchemeHandler:self forURLScheme:@"finicky-assets"];
@@ -100,17 +116,21 @@ void SetFileContentWithLength(const char* path, const char* content, size_t leng
          injectionTime:WKUserScriptInjectionTimeAtDocumentStart
       forMainFrameOnly:YES];
     [config.userContentController addUserScript:stubUserScript];
+    [stubUserScript release];
 
-    // Create WKWebView
     webView = [[WKWebView alloc] initWithFrame:window.contentView.bounds configuration:config];
+    [config release]; // the web view keeps its own copy
     webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     webView.navigationDelegate = self;
-    webView.wantsLayer = true;
-    webView.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.1 alpha:1.0].CGColor;
+    // No fixed color: until the page paints, the window color shows through,
+    // so opening the window in light mode does not flash dark.
+    [webView setValue:@NO forKey:@"drawsBackground"];
+    if (@available(macOS 12.0, *)) {
+        webView.underPageBackgroundColor = [NSColor windowBackgroundColor];
+    }
 
     [webView.configuration.preferences setValue:@true forKey:@"developerExtrasEnabled"];
 
-    // Load HTML content
     if (htmlContent) {
         NSURL* baseURL = [NSURL URLWithString:@"finicky-assets://local/"];
         [webView loadHTMLString:htmlContent baseURL:baseURL];
@@ -118,22 +138,28 @@ void SetFileContentWithLength(const char* path, const char* content, size_t leng
         NSLog(@"Warning: HTML content not set");
     }
 
-    // Add window close notification observer
-    [[NSNotificationCenter defaultCenter] addObserver:self
-                                         selector:@selector(windowWillClose:)
-                                             name:NSWindowWillCloseNotification
-                                           object:window];
-
-    // Set webView as content view
     window.contentView = webView;
+}
+
+- (void)destroyWebView {
+    if (!webView) return;
+    [webView stopLoading];
+    webView.navigationDelegate = nil;
+    // The message handler retains self; remove it to break the cycle.
+    [webView.configuration.userContentController removeScriptMessageHandlerForName:@"finicky"];
+    window.contentView = [[[NSView alloc] initWithFrame:NSZeroRect] autorelease];
+    [webView release];
+    webView = nil;
 }
 
 - (void)showWindow {
     if ([NSThread isMainThread]) {
+        [self createWebView];
         [window makeKeyAndOrderFront:nil];
         [NSApp activateIgnoringOtherApps:true];
     } else {
         dispatch_async(dispatch_get_main_queue(), ^{
+            [self createWebView];
             [window makeKeyAndOrderFront:nil];
             [NSApp activateIgnoringOtherApps:true];
         });
@@ -273,6 +299,7 @@ void SetFileContentWithLength(const char* path, const char* content, size_t leng
 
 // Add new method to handle window close
 - (void)windowWillClose:(NSNotification *)notification {
+    [self destroyWebView];
     extern void WindowDidClose(void);
     WindowDidClose();
 }

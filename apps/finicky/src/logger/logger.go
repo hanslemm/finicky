@@ -1,7 +1,7 @@
 package logger
 
 import (
-	"bytes"
+	"finicky/logger/membuf"
 	"finicky/util"
 	"finicky/window"
 	"fmt"
@@ -9,11 +9,16 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 )
 
-var memLog *bytes.Buffer
+// memLog keeps the start-up log lines so they can be copied into the log
+// file once file logging turns on. It is bounded: a long-running process must
+// not keep every log line in memory.
+var memLog = membuf.New(256 << 10)
 var file *os.File
+var fileMu sync.Mutex
 
 // windowWriter implements io.Writer to send logs to the window
 type windowWriter struct{}
@@ -49,25 +54,30 @@ func createHandler(writer io.Writer) slog.Handler {
 
 // Setup initializes the logger with basic configuration
 func Setup() {
-	// Start with in-memory logging
-	memLog = &bytes.Buffer{}
-	multiWriter := io.MultiWriter(memLog, os.Stdout, &windowWriter{})
-
-	// Set the default logger
-	slog.SetDefault(slog.New(createHandler(multiWriter)))
+	slog.SetDefault(slog.New(createHandler(io.MultiWriter(memLog, os.Stdout, &windowWriter{}))))
 }
 
-// SetupFile configures file logging if enabled
+// SetupFile turns file logging on or off. It is called after each config
+// load. One log file is used per process; turning the option off closes it.
 func SetupFile(shouldLog bool) error {
-	slog.Debug("Setting up file logging", "shouldLog", shouldLog)
-	if shouldLog {
-		slog.Warn("Logging requests to disk. Logs may include sensitive information. Disable this by setting logRequests: false.")
-	}
+	fileMu.Lock()
+	defer fileMu.Unlock()
 
 	if !shouldLog {
-		// FIXME: We should recreate the logger if the file logging options has been changed while the app is running
+		if file != nil {
+			slog.Info("File logging turned off")
+			Setup()
+			file.Close()
+			file = nil
+		}
 		return nil
 	}
+
+	if file != nil {
+		return nil // already logging to a file
+	}
+
+	slog.Warn("Logging requests to disk. Logs may include sensitive information. Disable this by setting logRequests: false.")
 
 	homeDir, err := util.UserHomeDir()
 	if err != nil {
@@ -75,37 +85,35 @@ func SetupFile(shouldLog bool) error {
 	}
 
 	logDir := filepath.Join(homeDir, "Library", "Logs", "Finicky")
-	err = os.MkdirAll(logDir, 0755) // Create directory if it doesn't exist
-	if err != nil {
+	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return fmt.Errorf("failed to create log directory: %v", err)
 	}
 
 	currentTime := time.Now().Format("2006-01-02_15-04-05.000")
 	logFile := filepath.Join(logDir, fmt.Sprintf("Finicky_%s.log", currentTime))
 
-	file, err = os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(logFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err != nil {
 		return fmt.Errorf("failed to open log file: %v", err)
 	}
 
-	slog.Info("Log file created", "path", logFile)
-
 	// Write buffered logs to file
-	if _, err := file.Write(memLog.Bytes()); err != nil {
+	if _, err := f.Write(memLog.Bytes()); err != nil {
+		f.Close()
 		return fmt.Errorf("failed to write buffered logs: %v", err)
 	}
+	file = f
 
-	// Update writer to include file while preserving window writer
-	multiWriter := io.MultiWriter(file, memLog, os.Stdout, &windowWriter{})
-
-	// Update the default logger
-	slog.SetDefault(slog.New(createHandler(multiWriter)))
+	slog.SetDefault(slog.New(createHandler(io.MultiWriter(file, memLog, os.Stdout, &windowWriter{}))))
+	slog.Info("Log file created", "path", logFile)
 	return nil
 }
 
 // Close properly closes the logger and any open file handles
 func Close() {
 	slog.Info("Application closed!")
+	fileMu.Lock()
+	defer fileMu.Unlock()
 	if file != nil {
 		file.Close()
 	}

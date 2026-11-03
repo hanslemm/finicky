@@ -4,80 +4,128 @@
   import BrowserProfileSelector from "../components/BrowserProfileSelector.svelte";
   import WarningIcon from "../components/icons/Warning.svelte";
   import XIcon from "../components/icons/X.svelte";
-  import type { Rule, RulesFile } from "../types";
+  import type { ConfigInfo, Rule, RulesFile } from "../types";
+  import { toast } from "../lib/toast";
+  import { draft } from "../lib/draftRule.svelte";
+  import { testUrlInput, testUrlResult } from "../lib/testUrlStore";
 
   let {
     rulesFile = { defaultBrowser: "", rules: [] },
     installedBrowsers = [],
     profilesByBrowser = {},
-    isJSConfig = false,
+    config,
   }: {
     rulesFile: RulesFile;
     installedBrowsers: string[];
     profilesByBrowser: Record<string, string[]>;
-    isJSConfig: boolean;
+    config: ConfigInfo;
   } = $props();
 
-  const SAVE_DEBOUNCE = 3000;
+  const SAVE_DEBOUNCE = 500;
+  const SAFARI = "Safari";
 
-  // Local editable copies
-  let rules = $state<Rule[]>(rulesFile.rules.map((r: Rule) => ({ ...r })));
+  const isJSConfig = $derived(config.isJSConfig ?? false);
 
-  // Per-row "Custom..." state
+  // ---- Local editable state -------------------------------------------------
+
+  let rules = $state<Rule[]>([]);
   let rowIsCustom = $state<boolean[]>([]);
   let rowProfileIsCustom = $state<boolean[]>([]);
+  let defaultBrowser = $state("");
+  let defaultProfile = $state("");
 
-  function profileOptions(browser: string): string[] {
-    return profilesByBrowser[browser] ?? [];
-  }
+  type SaveState = "idle" | "pending" | "saved";
+  let saveState = $state<SaveState>("idle");
+  let saveTimer: ReturnType<typeof setTimeout> | undefined;
+  let savedTimer: ReturnType<typeof setTimeout> | undefined;
 
-  let saveTimer: ReturnType<typeof setTimeout>;
+  let announcement = $state("");
   let focusTarget = $state<{ rule: number; pattern: number } | null>(null);
 
-  function patternNeedsWildcard(pattern: string): boolean {
-    return !/\*/.test(pattern.trim()) && pattern.trim().length > 0;
+  function normalize(r: Rule): Rule {
+    return {
+      ...r,
+      match: Array.isArray(r.match) ? r.match : r.match ? [r.match as unknown as string] : [""],
+    };
   }
 
-  function autofocusNew(node: HTMLInputElement, coords: { rule: number; pattern: number }) {
-    if (focusTarget && focusTarget.rule === coords.rule && focusTarget.pattern === coords.pattern) {
-      tick().then(() => { node.focus(); focusTarget = null; });
+  // Take incoming props into local state, except while a local edit waits to be saved.
+  $effect(() => {
+    const incoming = rulesFile;
+    if (untrack(() => saveState === "pending")) return;
+    const newRules = (incoming.rules ?? []).map(normalize);
+    rules = newRules;
+    defaultBrowser = incoming.defaultBrowser || SAFARI;
+    defaultProfile = incoming.defaultProfile ?? "";
+    rowIsCustom = newRules.map((r) => r.browser !== "" && !untrack(() => installedBrowsers).includes(r.browser));
+    rowProfileIsCustom = newRules.map(() => false);
+    untrack(() => requestProfiles([...newRules.map((r) => r.browser), defaultBrowser]));
+  });
+
+  // Correct the "custom" flags when the browser and profile lists arrive.
+  $effect(() => {
+    rules.forEach((r, i) => {
+      if (r.browser) rowIsCustom[i] = !installedBrowsers.includes(r.browser);
+      const profile = r.profile ?? "";
+      const profiles = profilesByBrowser[r.browser];
+      if (profile && profiles !== undefined) rowProfileIsCustom[i] = !profiles.includes(profile);
+    });
+  });
+
+  const defaultIsCustom = $derived(defaultBrowser !== "" && !installedBrowsers.includes(defaultBrowser));
+  const defaultProfileIsCustom = $derived(
+    defaultProfile !== "" && !(profilesByBrowser[defaultBrowser] ?? []).includes(defaultProfile)
+  );
+
+  function requestProfiles(browsers: string[]) {
+    for (const b of new Set(browsers)) {
+      if (b && profilesByBrowser[b] === undefined) {
+        window.finicky.sendMessage({ type: "getBrowserProfiles", browser: b });
+      }
     }
   }
-  let pendingSave = $state(false);
+
+  // ---- Saving ---------------------------------------------------------------
+
+  function payload(): RulesFile {
+    // Keep every other field of the file (options!) as it is.
+    const { path: _path, ...rest } = rulesFile;
+    return {
+      ...rest,
+      defaultBrowser: defaultBrowser === SAFARI && !rulesFile.defaultBrowser ? "" : defaultBrowser,
+      defaultProfile,
+      rules: $state.snapshot(rules),
+    };
+  }
 
   function save() {
     clearTimeout(saveTimer);
-    const payload: RulesFile = {
-      defaultBrowser: rulesFile.defaultBrowser,
-      defaultProfile: rulesFile.defaultProfile,
-      rules,
-    };
-    window.finicky.sendMessage({ type: "saveRules", payload });
-    pendingSave = false;
+    saveTimer = undefined;
+    window.finicky.sendMessage({ type: "saveRules", payload: payload() });
+    saveState = "saved";
+    clearTimeout(savedTimer);
+    savedTimer = setTimeout(() => (saveState = "idle"), 2000);
   }
 
   function scheduleSave() {
     clearTimeout(saveTimer);
-    pendingSave = true;
-    saveTimer = setTimeout(() => {
-      const payload: RulesFile = {
-        defaultBrowser: rulesFile.defaultBrowser,
-        defaultProfile: rulesFile.defaultProfile,
-        rules,
-      };
-      window.finicky.sendMessage({ type: "saveRules", payload });
-      pendingSave = false;
-    }, SAVE_DEBOUNCE);
+    saveState = "pending";
+    saveTimer = setTimeout(save, SAVE_DEBOUNCE);
   }
 
   onDestroy(() => {
-    clearTimeout(saveTimer);
+    // Leaving the page must not lose an edit that waits for its timer.
+    if (saveTimer !== undefined) save();
+    clearTimeout(savedTimer);
+    clearTimeout(testTimer);
   });
 
-  function onRowMatchInput(i: number, j: number, e: Event) {
-    const newMatch = [...rules[i].match];
-    newMatch[j] = (e.target as HTMLInputElement).value;
-    rules[i] = { ...rules[i], match: newMatch };
+  // ---- Editing --------------------------------------------------------------
+
+  function setPattern(i: number, j: number, value: string) {
+    const match = [...rules[i].match];
+    match[j] = value;
+    rules[i] = { ...rules[i], match };
     scheduleSave();
   }
 
@@ -88,448 +136,745 @@
   }
 
   function removePattern(i: number, j: number) {
-    const newMatch = rules[i].match.filter((_, idx) => idx !== j);
-    rules[i] = { ...rules[i], match: newMatch.length > 0 ? newMatch : [""] };
+    const match = rules[i].match.filter((_, idx) => idx !== j);
+    rules[i] = { ...rules[i], match: match.length > 0 ? match : [""] };
     save();
   }
 
-  function addRule() {
+  function addRule(rule: Rule = { match: [""], browser: "", profile: "" }) {
     const i = rules.length;
-    rules = [...rules, { match: [""], browser: "", profile: "" }];
-    rowIsCustom = [...rowIsCustom, false];
+    rules = [...rules, rule];
+    rowIsCustom = [...rowIsCustom, rule.browser !== "" && !installedBrowsers.includes(rule.browser)];
     rowProfileIsCustom = [...rowProfileIsCustom, false];
     focusTarget = { rule: i, pattern: 0 };
+    if (rule.browser) requestProfiles([rule.browser]);
   }
 
   function removeRule(i: number) {
+    const removed = rules[i];
+    const custom = rowIsCustom[i];
+    const profileCustom = rowProfileIsCustom[i];
     rules = rules.filter((_, idx) => idx !== i);
     rowIsCustom = rowIsCustom.filter((_, idx) => idx !== i);
     rowProfileIsCustom = rowProfileIsCustom.filter((_, idx) => idx !== i);
     save();
+    toast.action(`Rule ${i + 1} deleted`, {
+      label: "Undo",
+      run: () => {
+        rules = [...rules.slice(0, i), removed, ...rules.slice(i)];
+        rowIsCustom = [...rowIsCustom.slice(0, i), custom, ...rowIsCustom.slice(i)];
+        rowProfileIsCustom = [...rowProfileIsCustom.slice(0, i), profileCustom, ...rowProfileIsCustom.slice(i)];
+        save();
+      },
+    });
   }
 
-  // Drag-to-reorder
+  function move(from: number, to: number) {
+    if (to < 0 || to >= rules.length || from === to) return;
+    const reorder = <T,>(list: T[]) => {
+      const next = [...list];
+      const [item] = next.splice(from, 1);
+      next.splice(to, 0, item);
+      return next;
+    };
+    rules = reorder(rules);
+    rowIsCustom = reorder(rowIsCustom);
+    rowProfileIsCustom = reorder(rowProfileIsCustom);
+  }
+
+  // Keyboard reorder on the grip: arrow keys move the rule, Home/End to the ends.
+  async function onGripKey(e: KeyboardEvent, i: number) {
+    const to =
+      e.key === "ArrowUp" ? i - 1 :
+      e.key === "ArrowDown" ? i + 1 :
+      e.key === "Home" ? 0 :
+      e.key === "End" ? rules.length - 1 : null;
+    if (to === null || to < 0 || to >= rules.length || to === i) return;
+    e.preventDefault();
+    move(i, to);
+    save();
+    announcement = `Rule moved to position ${to + 1} of ${rules.length}.`;
+    await tick();
+    document.getElementById(`grip-${to}`)?.focus();
+  }
+
+  // Mouse drag
   let dragIndex = $state<number | null>(null);
-
-  function onDragStart(i: number) {
-    dragIndex = i;
-  }
 
   function onDragOver(e: DragEvent, i: number) {
     e.preventDefault();
     if (dragIndex === null || dragIndex === i) return;
-    const newRules = [...rules];
-    const newCustom = [...rowIsCustom];
-    const newProfileCustom = [...rowProfileIsCustom];
-    const [movedRule] = newRules.splice(dragIndex, 1);
-    const [movedCustom] = newCustom.splice(dragIndex, 1);
-    const [movedProfileCustom] = newProfileCustom.splice(dragIndex, 1);
-    newRules.splice(i, 0, movedRule);
-    newCustom.splice(i, 0, movedCustom);
-    newProfileCustom.splice(i, 0, movedProfileCustom);
-    rules = newRules;
-    rowIsCustom = newCustom;
-    rowProfileIsCustom = newProfileCustom;
+    move(dragIndex, i);
     dragIndex = i;
   }
 
   function onDragEnd() {
+    if (dragIndex !== null) save();
     dragIndex = null;
-    scheduleSave();
   }
 
-  // Request data from native on mount
+  function autofocusNew(node: HTMLInputElement, coords: { rule: number; pattern: number }) {
+    if (focusTarget && focusTarget.rule === coords.rule && focusTarget.pattern === coords.pattern) {
+      tick().then(() => {
+        node.focus();
+        focusTarget = null;
+      });
+    }
+  }
+
+  // A pattern with no "*" must equal the whole URL, which rarely happens.
+  function needsWildcard(pattern: string): boolean {
+    const p = pattern.trim();
+    return p.length > 0 && !p.includes("*");
+  }
+
+  function wildcardFix(pattern: string): string {
+    const p = pattern.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    return `*${p}*`;
+  }
+
+  // ---- Test a URL -----------------------------------------------------------
+
+  let testUrl = $state(untrack(() => $testUrlInput));
+  let testing = $state(false);
+  let testTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function normalizeUrl(url: string): string | null {
+    const value = url.trim();
+    if (!value) return null;
+    const withScheme = /^[a-z][a-z0-9+.-]*:/i.test(value) ? value : `https://${value}`;
+    try {
+      new URL(withScheme);
+      return withScheme;
+    } catch {
+      return null;
+    }
+  }
+
+  $effect(() => {
+    const url = normalizeUrl(testUrl);
+    testUrlInput.set(testUrl);
+    clearTimeout(testTimer);
+    if (!url) {
+      testUrlResult.set(null);
+      testing = false;
+      return;
+    }
+    testing = true;
+    testTimer = setTimeout(() => window.finicky.sendMessage({ type: "testUrl", url }), 250);
+  });
+
+  $effect(() => {
+    $testUrlResult;
+    testing = false;
+  });
+
+  // Saved rules change the result: test again after each save.
+  $effect(() => {
+    rulesFile;
+    const url = untrack(() => normalizeUrl(testUrl));
+    if (url) window.finicky.sendMessage({ type: "testUrl", url });
+  });
+
+  const matchedRule = $derived(
+    $testUrlResult && $testUrlResult.source === "rule" ? ($testUrlResult.ruleIndex ?? null) : null
+  );
+
+  function resultReason(): string {
+    const r = $testUrlResult;
+    if (!r) return "";
+    switch (r.source) {
+      case "rule":
+        return `Rule ${(r.ruleIndex ?? 0) + 1} matches.`;
+      case "js":
+        return `Handler ${(r.handlerIndex ?? 0) + 1} of your JS config matches.`;
+      case "default":
+        return "No rule matches, so the default browser opens it.";
+      default:
+        return "";
+    }
+  }
+
+  // ---- Start ----------------------------------------------------------------
+
   onMount(() => {
     window.finicky.sendMessage({ type: "getRules" });
     window.finicky.sendMessage({ type: "getInstalledBrowsers" });
-  });
-
-  onDestroy(() => clearTimeout(saveTimer));
-
-  // Sync incoming props into local state when they change; also fetch profiles for known browsers
-  $effect(() => {
-    if (pendingSave) return;
-    const newRules = rulesFile.rules.map((r: Rule) => ({
-      ...r,
-      match: Array.isArray(r.match) ? r.match : r.match ? [r.match as unknown as string] : [""],
-    }));
-    rules = newRules;
-    rowIsCustom = newRules.map(
-      (r) => r.browser !== "" && !installedBrowsers.includes(r.browser)
-    );
-    rowProfileIsCustom = newRules.map(
-      (r) => {
-        const profile = r.profile ?? "";
-        if (profile === "") return false;
-        const profiles = untrack(() => profilesByBrowser[r.browser]);
-        if (profiles === undefined) return false; // not fetched yet — correct later
-        return !profiles.includes(profile);
-      }
-    );
-    // Fetch profiles for browsers not yet loaded — untrack to avoid re-triggering on profilesByBrowser changes
-    const browsersToFetch = new Set<string>();
-    for (const r of newRules) {
-      if (r.browser) browsersToFetch.add(r.browser);
+    if (draft.rule) {
+      const d = draft.rule;
+      draft.rule = null;
+      // Wait for the rules from disk, then add the draft once.
+      setTimeout(() => {
+        addRule({ match: [d.pattern], browser: d.browser, profile: d.profile ?? "" });
+        save();
+        announcement = `Rule ${rules.length} added for ${d.pattern}.`;
+      }, 50);
     }
-    untrack(() => {
-      for (const b of browsersToFetch) {
-        if (profilesByBrowser[b] === undefined) {
-          window.finicky.sendMessage({ type: "getBrowserProfiles", browser: b });
-        }
-      }
-    });
-  });
-
-  // Once profile lists arrive, correct any rowProfileIsCustom entries that were
-  // deferred because profilesByBrowser wasn't loaded yet during the initial sync.
-  $effect(() => {
-    rules.forEach((r, i) => {
-      const profile = r.profile ?? "";
-      if (profile === "") return;
-      const profiles = profilesByBrowser[r.browser];
-      if (profiles === undefined) return; // still loading
-      rowProfileIsCustom[i] = !profiles.includes(profile);
-    });
   });
 </script>
 
 <PageContainer title="Rules">
   {#snippet description()}
-    {#if isJSConfig}
-      The first matching rule wins. <span style="color: var(--accent-color)">JS config is active</span> — its handlers run first and take priority over these rules.
-    {:else}
-      The first matching rule wins. Use <code>*</code> as a wildcard, e.g. <code>*example.com/*</code>.
-    {/if}
+    Rules run from top to bottom. The first rule that matches opens the link. Use <code>*</code> as a wildcard.
   {/snippet}
-  <!-- Rules list -->
+
+  <div class="sr-only" role="status" aria-live="polite">{announcement}</div>
+
+  <!-- Test -->
+  <div class="test" class:has-result={!!$testUrlResult}>
+    <label class="test-label" for="test-url">Test a link</label>
+    <div class="test-field">
+      <input
+        id="test-url"
+        class="text-input test-input"
+        type="text"
+        inputmode="url"
+        placeholder="Paste a URL, for example github.com/settings"
+        autocapitalize="off"
+        autocomplete="off"
+        spellcheck="false"
+        bind:value={testUrl}
+      />
+      {#if testUrl}
+        <button class="icon-btn" aria-label="Clear test URL" onclick={() => (testUrl = "")}><XIcon /></button>
+      {/if}
+    </div>
+    <div class="test-result" aria-live="polite">
+      {#if $testUrlResult?.error}
+        <span class="result-error">{$testUrlResult.error}</span>
+      {:else if $testUrlResult}
+        <span class="result-main">
+          Opens in <strong>{$testUrlResult.browser || "nothing"}</strong>{$testUrlResult.profile ? ` · ${$testUrlResult.profile}` : ""}{$testUrlResult.openInBackground ? ", in the background" : ""}.
+        </span>
+        <span class="result-reason">{resultReason()}</span>
+        {#if $testUrlResult.url && normalizeUrl(testUrl) !== $testUrlResult.url}
+          <span class="result-url">Final URL: <code>{$testUrlResult.url}</code></span>
+        {/if}
+      {:else if testUrl.trim() && !testing}
+        <span class="result-reason">Type a full or partial URL, for example <code>zoom.us/j/123</code>.</span>
+      {/if}
+    </div>
+  </div>
+
+  {#if isJSConfig}
+    <p class="note">
+      Your JS config is active. Its handlers run first; these rules run only when no handler matches.
+    </p>
+  {/if}
+
+  <!-- Rules -->
   {#if rules.length === 0}
-    <div class="empty-rules">
-      No rules yet. Add one below.
+    <div class="empty">
+      <p class="empty-title">No rules yet</p>
+      <p class="empty-text">A rule sends the links that match a pattern to one browser or profile.</p>
+      <button class="primary" onclick={() => addRule()}>Add the first rule</button>
     </div>
   {:else}
-    <div class="rules-list">
+    <ol class="rules" aria-label="Rules, in the order they run">
       {#each rules as rule, i}
-          <div
-            class="rule-row"
-            class:dragging={dragIndex === i}
-            class:no-browser={!rule.browser && !rowIsCustom[i]}
+        {@const missingBrowser = !rule.browser}
+        <li
+          class="rule"
+          class:dragging={dragIndex === i}
+          class:matched={matchedRule === i}
+          ondragover={(e) => onDragOver(e, i)}
+          ondrop={(e) => e.preventDefault()}
+        >
+          <button
+            id="grip-{i}"
+            class="grip"
             draggable="true"
-            ondragstart={() => onDragStart(i)}
-            ondragover={(e) => onDragOver(e, i)}
+            ondragstart={() => (dragIndex = i)}
             ondragend={onDragEnd}
-            role="listitem"
+            onkeydown={(e) => onGripKey(e, i)}
+            aria-label="Rule {i + 1} of {rules.length}. Use the arrow keys to move it."
+            title="Drag, or use the arrow keys, to change the order"
           >
-            <div class="rule-top">
-              <div class="drag-handle" aria-hidden="true">⠿</div>
-              <BrowserProfileSelector
-                browser={rule.browser}
-                profile={rule.profile ?? ""}
-                isCustom={rowIsCustom[i]}
-                isProfileCustom={rowProfileIsCustom[i]}
-                {installedBrowsers}
-                {profilesByBrowser}
-                required
-                browserPlaceholder="Select browser"
-                onBrowserChange={(browser, profile, isCustom) => {
-                  rules[i] = { ...rules[i], browser, profile };
-                  rowIsCustom[i] = isCustom;
-                  rowProfileIsCustom[i] = false;
-                }}
-                onProfileChange={(profile, isProfileCustom) => {
-                  rules[i] = { ...rules[i], profile };
-                  rowProfileIsCustom[i] = isProfileCustom;
-                }}
-                onRequestProfiles={(b) => window.finicky.sendMessage({ type: "getBrowserProfiles", browser: b })}
-                onSave={save}
-                onInput={scheduleSave}
-              />
-              {#if !rule.browser && !rowIsCustom[i]}
-                <span class="browser-required-hint">
-                  <WarningIcon />
-                  Browser required
-                </span>
-              {/if}
-              <button
-                class="delete-btn"
-                onclick={() => removeRule(i)}
-                aria-label="Delete rule"
-              >
-                <XIcon />
-              </button>
-            </div>
+            <span class="rule-no">{i + 1}</span>
+            <span class="grip-dots" aria-hidden="true">⠿</span>
+          </button>
 
-            <div class="rule-bottom">
+          <div class="rule-body">
+            <div class="rule-line">
+              <span class="rule-word">When the URL matches</span>
               <div class="patterns">
                 {#each rule.match as pattern, j}
-                  <div class="pattern-row">
-                    <div class="pattern-input-wrapper" class:has-warning={patternNeedsWildcard(pattern)}>
+                  {@const hintId = `hint-${i}-${j}`}
+                  <div class="pattern">
+                    <div class="pattern-row">
                       <input
                         class="text-input pattern-input"
                         type="text"
-                        placeholder="*.example.com/*"
+                        placeholder="*example.com/*"
+                        autocapitalize="off"
+                        autocomplete="off"
+                        spellcheck="false"
+                        aria-label="Rule {i + 1}, URL pattern {j + 1}"
+                        aria-describedby={needsWildcard(pattern) ? hintId : undefined}
                         value={pattern}
-                        oninput={(e) => onRowMatchInput(i, j, e)}
-                        onblur={() => save()}
+                        oninput={(e) => setPattern(i, j, (e.target as HTMLInputElement).value)}
+                        onblur={() => saveTimer !== undefined && save()}
                         use:autofocusNew={{ rule: i, pattern: j }}
                       />
-                      {#if patternNeedsWildcard(pattern)}
-                        <span class="pattern-warning-icon" aria-label="Exact URLs rarely match"><WarningIcon /></span>
+                      {#if rule.match.length > 1}
+                        <button class="icon-btn" onclick={() => removePattern(i, j)} aria-label="Remove pattern {j + 1} of rule {i + 1}"><XIcon /></button>
                       {/if}
                     </div>
-                    {#if rule.match.length > 1}
-                      <button
-                        class="remove-pattern-btn"
-                        onclick={() => removePattern(i, j)}
-                        aria-label="Remove pattern"
-                      ><XIcon /></button>
+                    {#if needsWildcard(pattern)}
+                      <p class="hint" id={hintId}>
+                        <WarningIcon />
+                        Without <code>*</code> this matches only this exact URL.
+                        <button class="link-btn" onclick={() => { setPattern(i, j, wildcardFix(pattern)); save(); }}>
+                          Use <code>{wildcardFix(pattern)}</code>
+                        </button>
+                      </p>
                     {/if}
                   </div>
                 {/each}
-                <button class="add-pattern-btn" onclick={() => addPattern(i)}>+ URL</button>
+                <button class="link-btn add-pattern" onclick={() => addPattern(i)}>+ Another pattern</button>
+              </div>
+            </div>
+
+            <div class="rule-line">
+              <span class="rule-word">Open in</span>
+              <div class="target">
+                <BrowserProfileSelector
+                  browser={rule.browser}
+                  profile={rule.profile ?? ""}
+                  isCustom={rowIsCustom[i]}
+                  isProfileCustom={rowProfileIsCustom[i]}
+                  {installedBrowsers}
+                  {profilesByBrowser}
+                  required
+                  label="Browser for rule {i + 1}"
+                  describedBy={missingBrowser ? `missing-${i}` : undefined}
+                  browserPlaceholder="Choose a browser"
+                  onBrowserChange={(browser, profile, isCustom) => {
+                    rules[i] = { ...rules[i], browser, profile };
+                    rowIsCustom[i] = isCustom;
+                    rowProfileIsCustom[i] = false;
+                  }}
+                  onProfileChange={(profile, isProfileCustom) => {
+                    rules[i] = { ...rules[i], profile };
+                    rowProfileIsCustom[i] = isProfileCustom;
+                  }}
+                  onRequestProfiles={(b) => requestProfiles([b])}
+                  onSave={save}
+                  onInput={scheduleSave}
+                />
+                {#if missingBrowser}
+                  <p class="hint" id="missing-{i}"><WarningIcon /> Choose a browser. Until then this rule does nothing.</p>
+                {/if}
               </div>
             </div>
           </div>
-        {/each}
-    </div>
+
+          <button class="icon-btn delete" onclick={() => removeRule(i)} aria-label="Delete rule {i + 1}" title="Delete rule">
+            <XIcon />
+          </button>
+        </li>
+      {/each}
+    </ol>
   {/if}
 
-  <button class="add-rule-btn" onclick={addRule}>+ Add rule</button>
+  <div class="list-actions">
+    {#if rules.length > 0}
+      <button class="secondary" onclick={() => addRule()}>+ Add rule</button>
+    {/if}
+    <span class="save-state" role="status">
+      {#if saveState === "pending"}Saving…{:else if saveState === "saved"}Saved{/if}
+    </span>
+  </div>
+
+  <!-- Default browser -->
+  <div class="fallback" class:matched={$testUrlResult?.source === "default"}>
+    <span class="rule-word">Otherwise open in</span>
+    {#if isJSConfig}
+      <span class="fallback-fixed">
+        <strong>{config.defaultBrowser || "—"}</strong>
+        <span class="fallback-note">Set by your JS config</span>
+      </span>
+    {:else}
+      <div class="target">
+        <BrowserProfileSelector
+          browser={defaultBrowser}
+          profile={defaultProfile}
+          isCustom={defaultIsCustom}
+          isProfileCustom={defaultProfileIsCustom}
+          {installedBrowsers}
+          {profilesByBrowser}
+          label="Default browser"
+          browserPlaceholder="Safari"
+          onBrowserChange={(browser, profile) => {
+            defaultBrowser = browser;
+            defaultProfile = profile;
+          }}
+          onProfileChange={(profile) => {
+            defaultProfile = profile;
+          }}
+          onRequestProfiles={(b) => requestProfiles([b])}
+          onSave={save}
+          onInput={scheduleSave}
+        />
+      </div>
+    {/if}
+  </div>
 </PageContainer>
 
 <style>
+  code {
+    font-family: var(--font-mono);
+    font-size: 0.92em;
+    background: var(--inset-bg);
+    padding: 1px 4px;
+    border-radius: 4px;
+  }
+
   .text-input {
-    padding: 8px 12px;
+    width: 100%;
+    box-sizing: border-box;
+    padding: 7px 10px;
     background: var(--input-bg);
     border: 1px solid var(--border-color);
     border-radius: 8px;
     color: var(--text-primary);
-    font-size: 0.9em;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-size: 0.88em;
+    font-family: var(--font-mono);
   }
 
-  .text-input:focus {
-    outline: none;
+  .text-input:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
     border-color: var(--accent-color);
   }
 
   .text-input::placeholder {
     color: var(--text-secondary);
-    opacity: 0.4;
   }
 
-  .empty-rules {
-    color: var(--text-secondary);
-    font-size: 0.9em;
-    opacity: 0.6;
-    padding: 16px 0 4px;
-    text-align: center;
+  /* Test */
+  .test {
+    display: grid;
+    gap: 6px;
+    padding: 14px 16px;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
   }
 
-  .rules-list {
+  .test-label {
+    font-size: 0.85em;
+    font-weight: 600;
+    color: var(--text-primary);
+  }
+
+  .test-field {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+
+  .test-input {
+    font-size: 0.92em;
+    padding: 9px 12px;
+  }
+
+  .test-result {
     display: flex;
     flex-direction: column;
-    gap: 0;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
+    gap: 2px;
+    min-height: 1.4em;
+    font-size: 0.86em;
+  }
+
+  .result-main {
+    color: var(--text-primary);
+  }
+
+  .result-main strong {
+    color: var(--accent-color);
+  }
+
+  .result-reason,
+  .result-url {
+    color: var(--text-secondary);
+  }
+
+  .result-url code {
+    word-break: break-all;
+  }
+
+  .result-error {
+    color: var(--text-error);
+    white-space: pre-wrap;
+  }
+
+  .note {
+    margin: 0;
+    padding: 10px 14px;
+    border-radius: 10px;
+    background: var(--inset-bg);
+    color: var(--text-secondary);
+    font-size: 0.85em;
+  }
+
+  /* Rules */
+  .rules {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+    background: var(--card-bg);
     overflow: hidden;
   }
 
-  .rule-row {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    padding: 10px 12px;
-    background: var(--card-bg);
-    border-radius: 0;
-    border: none;
+  .rule {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 12px;
+    padding: 12px 10px 12px 8px;
     border-bottom: 1px solid var(--border-color);
-    transition: background 0.15s;
+    transition: background 0.15s ease, box-shadow 0.15s ease;
   }
 
-  .rule-row:last-child {
+  .rule:last-child {
     border-bottom: none;
   }
 
-  .rule-row:hover {
+  .rule.matched,
+  .fallback.matched {
+    background: color-mix(in srgb, var(--accent-fill) 10%, transparent);
+    box-shadow: inset 2px 0 0 var(--accent-fill);
+  }
+
+  .rule.dragging {
+    opacity: 0.6;
     background: var(--bg-hover);
   }
 
-  .rule-row.no-browser {
-    border-left: 3px solid var(--log-warning);
-    padding-left: 9px;
-  }
-
-  .browser-required-hint {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    color: var(--log-warning);
-    font-size: 0.75em;
-    white-space: nowrap;
-    flex-shrink: 0;
-  }
-
-  .browser-required-hint :global(svg) {
-    width: 12px;
-    height: 12px;
-    flex-shrink: 0;
-  }
-
-  .rule-row.dragging {
-    outline: 2px solid var(--accent-color);
-    outline-offset: -2px;
-    opacity: 0.7;
-  }
-
-  .rule-top {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .rule-bottom {
-    display: flex;
-    align-items: flex-start;
-    gap: 8px;
-    min-width: 0;
-    padding-left: 22px;
-  }
-
-  .drag-handle {
-    color: var(--text-secondary);
-    opacity: 0.4;
-    cursor: grab;
-    font-size: 1.1em;
-    user-select: none;
-    flex-shrink: 0;
-  }
-
-  .patterns {
+  .grip {
+    align-self: start;
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    flex: 1;
+    align-items: center;
+    gap: 2px;
+    width: 30px;
+    padding: 4px 0;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-secondary);
+    cursor: grab;
+    font: inherit;
+  }
+
+  .grip:hover {
+    background: var(--bg-hover);
+  }
+
+  .rule-no {
+    font-size: 0.78em;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--text-primary);
+  }
+
+  .grip-dots {
+    font-size: 0.95em;
+    line-height: 1;
+  }
+
+  .rule-body {
+    display: grid;
+    gap: 8px;
     min-width: 0;
+  }
+
+  .rule-line {
+    display: grid;
+    grid-template-columns: 9.5em minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+  }
+
+  .rule-word {
+    padding-top: 7px;
+    color: var(--text-secondary);
+    font-size: 0.84em;
+    white-space: nowrap;
+  }
+
+  .patterns,
+  .target {
+    display: grid;
+    gap: 6px;
+    min-width: 0;
+  }
+
+  .pattern {
+    display: grid;
+    gap: 4px;
   }
 
   .pattern-row {
     display: flex;
     align-items: center;
     gap: 4px;
-    min-width: 0;
   }
 
-  .pattern-input-wrapper {
-    position: relative;
-    flex: 1;
-    min-width: 0;
-  }
-
-  .pattern-input-wrapper.has-warning .pattern-input {
-    padding-right: 32px;
-  }
-
-  .pattern-warning-icon {
-    position: absolute;
-    right: 7px;
-    top: 50%;
-    transform: translateY(-50%);
+  .hint {
     display: flex;
-    color: var(--log-warning);
-    line-height: 1;
-    cursor: help;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 4px;
+    margin: 0;
+    color: var(--text-warning);
+    font-size: 0.8em;
   }
 
-  .pattern-warning-icon::after {
-    content: "Exact URLs rarely match, maybe you want use a wildcard?";
-    display: none;
-    position: absolute;
-    bottom: calc(100% + 6px);
-    right: 0;
-    background: var(--card-bg, #222);
+  .hint :global(svg) {
+    width: 12px;
+    height: 12px;
+    flex-shrink: 0;
+  }
+
+  .icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    background: none;
+    border: none;
+    border-radius: 6px;
+    color: var(--text-secondary);
+    cursor: pointer;
+  }
+
+  .icon-btn:hover {
+    background: var(--bg-hover);
     color: var(--text-primary);
-    border: 1px solid var(--border-color);
-    font-size: 0.78rem;
-    font-family: inherit;
-    white-space: nowrap;
-    padding: 4px 8px;
-    border-radius: 5px;
-    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.3);
-    pointer-events: none;
-    z-index: 20;
   }
 
-  .pattern-warning-icon:hover::after {
-    display: block;
+  .icon-btn.delete {
+    align-self: start;
   }
 
-  .pattern-input {
-    width: 100%;
+  .icon-btn.delete:hover {
+    color: var(--text-error);
   }
 
-  .remove-pattern-btn {
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding: 3px;
-    border-radius: 4px;
-    flex-shrink: 0;
-    display: flex;
-    transition: color 0.15s;
-  }
-
-  .remove-pattern-btn:hover {
-    color: var(--log-error);
-  }
-
-  .add-pattern-btn {
-    align-self: flex-start;
-    background: none;
-    border: none;
-    color: var(--text-secondary);
-    font-size: 0.78em;
+  .link-btn {
+    justify-self: start;
     padding: 2px 4px;
-    cursor: pointer;
-    transition: color 0.15s;
-  }
-
-  .add-pattern-btn:hover {
-    color: var(--accent-color);
-  }
-
-  .delete-btn {
+    margin-left: -4px;
     background: none;
     border: none;
-    color: var(--text-secondary);
-    cursor: pointer;
-    padding: 4px;
     border-radius: 4px;
-    flex-shrink: 0;
-    display: flex;
-    margin-left: auto;
-    transition: color 0.15s;
-  }
-
-  .delete-btn:hover {
-    color: var(--log-error);
-  }
-
-  .add-rule-btn {
-    align-self: flex-start;
-    background: transparent;
-    border: 1px solid var(--accent-color);
-    border-radius: 8px;
     color: var(--accent-color);
-    font-size: 0.88em;
-    padding: 8px 16px;
+    font: inherit;
+    font-size: inherit;
     cursor: pointer;
-    transition: background 0.15s ease, color 0.15s ease;
   }
 
-  .add-rule-btn:hover {
+  .link-btn:hover {
+    text-decoration: underline;
+  }
+
+  .add-pattern {
+    font-size: 0.8em;
+  }
+
+  .list-actions {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 32px;
+  }
+
+  .save-state {
+    color: var(--text-secondary);
+    font-size: 0.82em;
+  }
+
+  button.primary,
+  button.secondary {
+    min-height: 30px;
+    padding: 5px 14px;
+    border-radius: 8px;
+    font: inherit;
+    font-size: 0.86em;
+    cursor: pointer;
+  }
+
+  button.primary {
+    background: var(--accent-fill);
+    border: 1px solid var(--accent-fill);
+    color: var(--accent-fill-text);
+    font-weight: 500;
+  }
+
+  button.secondary {
+    background: var(--button-bg);
+    border: 1px solid var(--border-color);
+    color: var(--text-primary);
+  }
+
+  button.secondary:hover {
     background: var(--button-hover);
-    color: var(--accent-color);
+  }
+
+  .empty {
+    display: grid;
+    justify-items: center;
+    gap: 6px;
+    padding: 24px;
+    border: 1px dashed var(--border-color);
+    border-radius: 12px;
+    text-align: center;
+  }
+
+  .empty p {
+    margin: 0;
+  }
+
+  .empty-title {
+    color: var(--text-primary);
+    font-weight: 600;
+  }
+
+  .empty-text {
+    color: var(--text-secondary);
+    font-size: 0.86em;
+    margin-bottom: 6px !important;
+  }
+
+  /* Default browser */
+  .fallback {
+    display: grid;
+    grid-template-columns: 9.5em minmax(0, 1fr);
+    align-items: start;
+    gap: 10px;
+    /* Line up with the rule rows: grip column on the left, delete column on the right. */
+    padding: 12px 48px 12px 50px;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
+  }
+
+  .fallback-fixed {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    padding-top: 6px;
+    font-size: 0.9em;
+  }
+
+  .fallback-note {
+    color: var(--text-secondary);
+    font-size: 0.9em;
   }
 </style>

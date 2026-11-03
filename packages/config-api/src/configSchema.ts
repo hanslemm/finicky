@@ -135,7 +135,13 @@ const ConfigOptionsSchema = z
     logRequests: z.boolean().optional().describe("Log to file on disk"),
     checkForUpdates: z.boolean().optional().describe("Check for updates"),
     keepRunning: z.boolean().optional().describe("Keep the app running"),
-    hideIcon: z.boolean().optional().describe("Hide the app icon")
+    hideIcon: z.boolean().optional().describe("Hide the app icon"),
+    resolveShortUrls: z
+      .boolean()
+      .optional()
+      .describe(
+        "Follow redirects of known URL shorteners (bit.ly, t.co, …) before matching. Costs a network request per short link. Default: true"
+      ),
   })
   .identifier("ConfigOptions");
 

@@ -2,92 +2,103 @@
   import type { LogEntry } from "../types";
   import { formatLogEntry } from "../utils/text";
 
-  export let messageBuffer: LogEntry[] = [];
-  export let showDebug = true;
+  let { messageBuffer = [], showDebug = true }: { messageBuffer: LogEntry[]; showDebug?: boolean } = $props();
 
-  let logContent: HTMLElement;
+  const visible = $derived(
+    showDebug ? messageBuffer : messageBuffer.filter((e) => e.level?.toLowerCase() !== "debug")
+  );
 </script>
 
-<ol class="log-content" bind:this={logContent}>
-  {#each messageBuffer as entry}
-    {#if showDebug || entry.level.toLowerCase() !== "debug"}
+{#if visible.length === 0}
+  <p class="empty">No log lines yet. Open a link, or turn on “Show debug”.</p>
+{:else}
+  <ol class="log-content">
+    {#each visible as entry}
       <li class="log-entry">
-        <span class="log-time" title={entry.time}>
+        <time class="log-time" datetime={entry.time} title={entry.time}>
           {new Date(entry.time).toLocaleTimeString()}
-        </span>
-        <div class="log-message log-level-{entry.level.toLowerCase()}">
+        </time>
+        <span class="log-level log-level-{entry.level?.toLowerCase()}">{entry.level}</span>
+        <div class="log-message log-level-{entry.level?.toLowerCase()}">
           {#each formatLogEntry(entry) as part}
             {#if part.type === "url"}
-              <a href={part.content} target="_blank" rel="noopener noreferrer"
-                >{part.content}</a
-              >
+              <a href={part.content} target="_blank" rel="noopener noreferrer">{part.content}</a>
             {:else}
               {part.content}
             {/if}
           {/each}
         </div>
       </li>
-    {/if}
-  {/each}
-</ol>
+    {/each}
+  </ol>
+{/if}
 
 <style>
+  .empty {
+    margin: 0;
+    padding: 18px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 0.86em;
+    border: 1px dashed var(--border-color);
+    border-radius: 12px;
+  }
+
   .log-content {
     list-style: none;
     margin: 0;
-    padding: 0;
-    overflow-y: auto;
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-      monospace;
+    padding: 10px 12px;
+    font-family: var(--font-mono);
+    font-size: 0.82em;
     line-height: 1.5;
     color: var(--text-primary);
-    flex: 1;
-    overflow: auto;
+    background: var(--card-bg);
+    border: 1px solid var(--card-border);
+    border-radius: 12px;
   }
 
   .log-entry {
-    display: flex;
-    justify-content: flex-start;
-    gap: 1em;
-    margin-bottom: 8px;
-    align-items: flex-start;
+    display: grid;
+    grid-template-columns: auto 3.6em minmax(0, 1fr);
+    gap: 0.9em;
+    padding: 3px 0;
+    align-items: baseline;
   }
 
-  .log-time {
+  .log-time,
+  .log-level {
     color: var(--text-secondary);
     white-space: nowrap;
-    font-size: 0.85em;
-    opacity: 0.8;
+  }
+
+  .log-level {
+    text-transform: lowercase;
   }
 
   .log-message {
-    flex-grow: 1;
     white-space: pre-wrap;
     word-break: break-word;
-    font-size: 0.95em;
   }
 
   .log-level-error {
-    color: var(--log-error);
+    color: var(--text-error);
   }
 
   .log-level-warn {
-    color: var(--log-warning);
+    color: var(--text-warning);
   }
 
   .log-level-debug {
     color: var(--log-debug);
   }
 
-  :global(.log-message a) {
+  .log-message a {
     color: inherit;
     text-decoration: underline;
     text-decoration-style: dotted;
-    opacity: 0.9;
   }
 
-  :global(.log-message a:hover) {
+  .log-message a:hover {
     text-decoration-style: solid;
-    opacity: 1;
   }
 </style>
