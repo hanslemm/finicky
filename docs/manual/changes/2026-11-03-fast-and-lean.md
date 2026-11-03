@@ -2,6 +2,7 @@
 title: Faster links, less memory
 summary: Links now open faster, and Finicky uses less memory while it waits.
 type: perf
+pr: https://github.com/hanslemm/finicky/pull/1
 ---
 ## For everyone
 

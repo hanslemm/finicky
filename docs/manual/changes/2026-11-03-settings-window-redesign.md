@@ -2,6 +2,7 @@
 title: A settings window that runs Finicky for you
 summary: You can now set up and run Finicky from its window, see where each link went, make a rule from a link in one click, and test any link.
 type: feat
+pr: https://github.com/hanslemm/finicky/pull/1
 ---
 ## For everyone
 
