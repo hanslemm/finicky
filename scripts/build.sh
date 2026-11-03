@@ -24,7 +24,9 @@ set -e
 )
 
 # Get build information
-COMMIT_HASH=$(git rev-parse --short HEAD)
+# Homebrew builds from a copy of the source with no .git folder; it passes
+# COMMIT_HASH itself.
+COMMIT_HASH=${COMMIT_HASH:-$(git rev-parse --short HEAD 2>/dev/null || echo unknown)}
 BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M:%S UTC')
 API_HOST=$(cat .env 2>/dev/null | grep API_HOST | cut -d '=' -f 2 || echo "")
 

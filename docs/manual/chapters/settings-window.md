@@ -86,6 +86,9 @@ for the process and copies `memLog` into it. When the option turns off, it close
 - `defaultBrowserStatus`: `{isDefault}`. Sent at start, each time the window opens, and after
   `makeDefaultBrowser` (Go polls for 30 s while macOS shows its dialog).
 - `testUrlResult` also has `source`, `ruleIndex` and `handlerIndex`.
+- `browserProfiles`: `browser`, `profiles`, `supported` (the browser has profiles Finicky can
+  select) and `blocked` (macOS refused the read). With `supported` and no list, the profile field
+  is a text field for the folder name, with a hint when `blocked`.
 - Log file: `~/Library/Logs/Finicky/Finicky_<time>.log`, mode `0600`, one file per process.
 
 ## Traps

@@ -362,9 +362,11 @@ func handleGetInstalledBrowsers() {
 
 func handleGetBrowserProfiles(msg map[string]interface{}) {
 	browserName, _ := msg["browser"].(string)
-	profiles := browser.GetProfilesForBrowser(browserName)
+	info := browser.GetProfileInfo(browserName)
 	SendMessageToWebView("browserProfiles", map[string]interface{}{
-		"browser":  browserName,
-		"profiles": profiles,
+		"browser":   browserName,
+		"profiles":  info.Profiles,
+		"supported": info.Supported,
+		"blocked":   info.Blocked,
 	})
 }

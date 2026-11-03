@@ -19,6 +19,7 @@ Node 22.
 ./scripts/build.sh            # build config-api + UI, embed them, build the app
                               # local build: arm64 only, REPLACES /Applications/Finicky.app
 BUILD_TARGET_ARCH=arm64 ./scripts/build.sh   # build into apps/finicky/build/, no install
+brew upgrade --fetch-HEAD hanslemm/finicky/finicky   # rebuild the installed app from main (Formula/finicky.rb)
 BUILD_UNIVERSAL=1 ./scripts/build.sh   # arm64 + amd64 + lipo (what CI does)
 ./scripts/test.sh             # go test ./... in apps/finicky/src
 

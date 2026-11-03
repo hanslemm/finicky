@@ -32,11 +32,15 @@ network.
 4. **Match.** `openUrl` (`packages/config-api/src/index.ts:89`) runs the rewrites in order, then
    the first matching handler gives the browser, else `defaultBrowser`. `matchWildcard`
    (`wildcard.ts:7`) keeps each compiled pattern in a map, with a cap of 1000 patterns.
-5. **Open.** `browser.LaunchBrowser` (`browser/launcher.go:45`) calls `openNative`
-   (`browser/open_native.go:107`). It asks LaunchServices through `NSWorkspace`:
-   - no profile: `openURLs:withApplicationAtURL:configuration:`;
+5. **Open.** `browser.LaunchBrowser` (`browser/launcher.go`) asks `nativePlan` whether the
+   request has a native form, then calls `openNative` (`browser/open_native.go`). It asks
+   LaunchServices through `NSWorkspace`:
+   - no profile, no args: `openURLs:withApplicationAtURL:configuration:`;
    - a profile: `openApplicationAtURL:configuration:` with a new instance and the arguments
-     `<profile flag> <url>`, the same as `open -n -a App --args …`.
+     `<profile flag> <url>`, the same as `open -n -a App --args …`;
+   - custom `args` with no `--args`: they are the app arguments (after the profile flag);
+   - custom `args` of the form `[-n] [-g] --args <app args>`: `-n` and `-g` become options.
+   Any other `open` flag, or a profile together with `--args`, goes to `/usr/bin/open`.
    It waits up to 10 s for LaunchServices to finish.
 6. **Record.** `recordRecentLink` (`main.go`) adds the link, the opener and the result to the
    recent-links list of the settings window (see [Settings window and logs](settings-window.md)).
@@ -53,6 +57,14 @@ for a folder named after the app, the app without " Browser", or the last part o
 one or two levels deep (`Vendor/App`). A folder with `Local State` is Chromium-based; one with
 `profiles.ini` is Firefox-based. Results, also "not found", are cached for the process. Safari
 profiles are not supported: Safari has no command-line switch to pick one.
+
+> [!WARNING]
+> Recent macOS (seen on macOS 27) refuses every app, also the terminal, the read of another
+> app's data, such as Chrome's `Local State` ("operation not permitted"). Finicky then cannot
+> list profiles or turn a display name into a folder. `isBlocked` detects this. A Chromium
+> profile that looks like a folder name (`Default`, `Profile N`; `chromiumProfileDirRe`) is then
+> passed as `--profile-directory` as it is; a display name is not, because Chrome would make a
+> new, empty profile with it. A Firefox profile is passed to `-P` as it is.
 
 ```diagram
 { "nodes": [
@@ -113,6 +125,9 @@ small test config and an app that was already open, it was 8–13 ms.
   config object that it checked before.
 - A host is a shortener only when it equals a listed domain or ends with `.` plus that domain
   (`isShortenerHost`, `shorturl/resolver.go:48`). `notbit.ly` is not `bit.ly`.
+- AppKit hands each command-line argument that is not a flag to `application:openFile:`. That
+  method skips a path that is one of Finicky's own launch arguments (`isLaunchArgument`,
+  `main.m`), so `--config <file>` does not also open the file as a link.
 - With no VM (no config), URLs open in Safari (`defaultBrowserConfig`, `resolver.go:184`).
 
 ## Data and interfaces

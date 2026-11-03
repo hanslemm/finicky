@@ -247,7 +247,27 @@
                     forEventClass:kInternetEventClass andEventID:kAEGetURL];
 }
 
+// AppKit treats each command-line argument that is not a flag as a document to
+// open. So `Finicky --config ~/x.js` would also open ~/x.js "as a link". A path
+// that is one of our own launch arguments is a flag value, not a document.
+static BOOL isLaunchArgument(NSString *filename) {
+    NSString *target = [filename stringByStandardizingPath];
+    NSString *cwd = [[NSFileManager defaultManager] currentDirectoryPath];
+    NSArray<NSString *> *args = [[NSProcessInfo processInfo] arguments];
+    for (NSUInteger i = 1; i < args.count; i++) {
+        NSString *arg = args[i];
+        if ([arg hasPrefix:@"-"]) continue;
+        NSString *path = [arg isAbsolutePath] ? arg : [cwd stringByAppendingPathComponent:arg];
+        if ([[path stringByStandardizingPath] isEqualToString:target]) return YES;
+    }
+    return NO;
+}
+
 - (bool)application:(NSApplication *)sender openFile:(NSString *)filename {
+    if (isLaunchArgument(filename)) {
+        return true;
+    }
+
     self.receivedURL = true;
 
     NSLog(@"Opening file: %@", filename);

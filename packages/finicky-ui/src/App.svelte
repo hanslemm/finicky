@@ -6,7 +6,7 @@
   import About from "./pages/About.svelte";
   import Rules from "./pages/Rules.svelte";
   import ToastContainer from "./components/ToastContainer.svelte";
-  import type { LogEntry, UpdateInfo, ConfigInfo, RulesFile, RecentLink } from "./types";
+  import type { LogEntry, UpdateInfo, ConfigInfo, RulesFile, RecentLink, ProfileStatus } from "./types";
   import { testUrlResult } from "./lib/testUrlStore";
   import { toast } from "./lib/toast";
   import { router } from "./lib/router.svelte";
@@ -32,6 +32,7 @@
   let rulesFile = $state<RulesFile>({ defaultBrowser: "", rules: [] });
   let installedBrowsers = $state<string[]>([]);
   let profilesByBrowser = $state<Record<string, string[]>>({});
+  let profileStatus = $state<Record<string, ProfileStatus>>({});
   let recentLinks = $state.raw<RecentLink[]>([]);
   let isDefaultBrowser = $state<boolean | null>(null);
 
@@ -81,7 +82,14 @@
       case "browserProfiles":
         profilesByBrowser = {
           ...profilesByBrowser,
-          [parsedMsg.message.browser]: parsedMsg.message.profiles,
+          [parsedMsg.message.browser]: parsedMsg.message.profiles ?? [],
+        };
+        profileStatus = {
+          ...profileStatus,
+          [parsedMsg.message.browser]: {
+            supported: !!parsedMsg.message.supported,
+            blocked: !!parsedMsg.message.blocked,
+          },
         };
         break;
       case "recentLinks":
@@ -147,7 +155,7 @@
             {recentLinks}
           />
         {:else if router.tab === "rules"}
-          <Rules {rulesFile} {installedBrowsers} {profilesByBrowser} {config} />
+          <Rules {rulesFile} {installedBrowsers} {profilesByBrowser} {profileStatus} {config} />
         {:else if router.tab === "settings"}
           <Settings {config} {rulesFile} {updateInfo} />
         {:else if router.tab === "logs"}
