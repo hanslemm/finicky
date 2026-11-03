@@ -12,7 +12,23 @@
     onClearLogs: () => void;
   } = $props();
 
-  let showDebug = $state(localStorage.getItem("showDebugLogs") === "true");
+  function readPref(): boolean {
+    try {
+      return localStorage.getItem("showDebugLogs") === "true";
+    } catch {
+      return false;
+    }
+  }
+
+  function writePref(value: boolean) {
+    try {
+      localStorage.setItem("showDebugLogs", String(value));
+    } catch {
+      // Storage can be unavailable; the toggle still works for this window.
+    }
+  }
+
+  let showDebug = $state(readPref());
 
   async function copyLogs() {
     const logEntries = messageBuffer
@@ -43,19 +59,20 @@
 
 <PageContainer title="Logs">
   {#snippet description()}
+    What Finicky did since it started: the last 1000 lines, in memory.
+  {/snippet}
     <div class="log-controls">
       <label class="debug-toggle">
         <input
           type="checkbox"
           bind:checked={showDebug}
-          onchange={() => localStorage.setItem("showDebugLogs", String(showDebug))}
+          onchange={() => writePref(showDebug)}
         />
         Show debug
       </label>
       <button onclick={onClearLogs}>Clear</button>
       <button onclick={copyLogs}>Copy</button>
     </div>
-  {/snippet}
 
   <LogContent {messageBuffer} {showDebug} />
 </PageContainer>
@@ -83,18 +100,18 @@
   }
 
   button {
-    padding: 3px 10px;
+    min-height: 28px;
+    padding: 3px 12px;
     border: 1px solid var(--border-color);
-    border-radius: 5px;
+    border-radius: 7px;
     background: var(--button-bg);
-    color: var(--text-secondary);
+    color: var(--text-primary);
     cursor: pointer;
-    font-size: 0.82em;
+    font-size: 0.85em;
     font-family: inherit;
-    transition: color 0.15s;
   }
 
   button:hover {
-    color: var(--text-primary);
+    background: var(--button-hover);
   }
 </style>

@@ -105,11 +105,9 @@
   }
 
   .section h2 {
-    font-size: 0.8em;
+    font-size: 0.9em;
     font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.05em;
-    color: var(--text-secondary);
+    color: var(--text-primary);
     margin: 0 0 6px 0;
   }
 
@@ -131,7 +129,7 @@
   }
 
   .repo-link:hover {
-    opacity: 0.8;
+    text-decoration: underline;
   }
 
   a {
@@ -140,6 +138,6 @@
   }
 
   a:hover {
-    opacity: 0.8;
+    text-decoration: underline;
   }
 </style>

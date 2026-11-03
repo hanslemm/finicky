@@ -178,6 +178,7 @@ func evaluateURL(vm *config.VM, url string, opener *OpenerInfo) (*browser.Browse
 	if browserResult.Error != "" {
 		resultErr = fmt.Errorf("%s", browserResult.Error)
 	}
+	browserResult.Browser.Matched = browserResult.Matched
 	return &browserResult.Browser, resultErr
 }
 

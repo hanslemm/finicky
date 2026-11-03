@@ -40,6 +40,9 @@ The rules editor writes `~/Library/Application Support/Finicky/rules.json` (`rul
   the VM runs it.
 - A JS config exists: the JSON rules come after the JS handlers (see
   [URL pipeline](url-pipeline.md), `ensureMergedConfig`).
+- Each handler made from the file carries `ruleIndex`, its index in the file
+  (`rules.ToJSHandlers`), so a match names the rule. Rules with no pattern or no browser are
+  skipped, so handler and rule indexes can differ.
 - A save from the rules editor has no `options`. `rules.MergeOptions` (`rules.go:124`) keeps the
   stored options, so a rule edit does not erase the Preferences toggles.
 

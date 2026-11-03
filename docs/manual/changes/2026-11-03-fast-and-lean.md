@@ -117,8 +117,8 @@ Most of the changes are on the path of one URL.
   the same new-instance and arguments as `open -n --args`. The fallback still covers apps that
   the native lookup cannot find.
 - The universal (arm64 and amd64) build was not run; only arm64 was built and measured.
-- The settings window has no option switch for `resolveShortUrls` yet; set it in the config file.
-- The design review of the settings window found more defects. They are not in this change.
+- The settings window switch for `resolveShortUrls` and the design-review fixes come in a
+  separate delivery: "A settings window that runs Finicky for you".
 
 ## Words used here
 

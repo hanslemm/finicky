@@ -123,8 +123,15 @@ export function openUrl(
     if (validConfig.handlers) {
       for (const [index, handler] of validConfig.handlers.entries()) {
         if (isMatch(handler.match, url, options)) {
+          // `ruleIndex` is set by the host on handlers made from the JSON
+          // rules file, so the settings window can point at the rule.
+          const ruleIndex = (handler as { ruleIndex?: unknown }).ruleIndex;
           return {
             browser: resolveBrowser(handler.browser, url, options),
+            matched: {
+              handlerIndex: index,
+              ruleIndex: typeof ruleIndex === "number" ? ruleIndex : undefined,
+            },
           };
         }
       }

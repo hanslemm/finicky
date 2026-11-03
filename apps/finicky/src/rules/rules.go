@@ -152,10 +152,12 @@ func SaveToPath(rf RulesFile, path string) error {
 }
 
 // ToJSHandlers converts rules to the handler format expected by finickyConfigAPI.
-// Rules with an empty match or browser are skipped.
+// Rules with an empty match or browser are skipped. Each handler carries
+// "ruleIndex", the index of its rule in the rules file, so a match can be
+// traced back to the rule the user sees.
 func ToJSHandlers(rules []Rule) []map[string]interface{} {
 	handlers := make([]map[string]interface{}, 0, len(rules))
-	for _, r := range rules {
+	for i, r := range rules {
 		// Filter out empty patterns
 		matches := make([]string, 0, len(r.Match))
 		for _, m := range r.Match {
@@ -179,8 +181,9 @@ func ToJSHandlers(rules []Rule) []map[string]interface{} {
 			browser = r.Browser
 		}
 		handlers = append(handlers, map[string]interface{}{
-			"match":   matchVal,
-			"browser": browser,
+			"match":     matchVal,
+			"browser":   browser,
+			"ruleIndex": i,
 		})
 	}
 	return handlers

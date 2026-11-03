@@ -28,6 +28,14 @@ import (
 var (
 	TestUrlHandler   func(string)
 	SaveRulesHandler func(rules.RulesFile)
+	// MakeDefaultHandler asks macOS to make Finicky the default browser.
+	MakeDefaultHandler func()
+	// WindowShownHandler runs each time the window opens, to refresh state
+	// that can change while it is closed (for example the default browser).
+	WindowShownHandler func()
+	// OpenConfigHandler opens the active config file, or shows it in Finder
+	// when reveal is true.
+	OpenConfigHandler func(reveal bool)
 )
 
 // Message buffering for the UI window.
@@ -46,10 +54,12 @@ const (
 )
 
 var stateTypes = map[string]bool{
-	"config":     true,
-	"version":    true,
-	"updateInfo": true,
-	"buildInfo":  true,
+	"config":               true,
+	"version":              true,
+	"updateInfo":           true,
+	"buildInfo":            true,
+	"recentLinks":          true,
+	"defaultBrowserStatus": true,
 }
 
 var (
@@ -200,6 +210,9 @@ func loadAssets() {
 func ShowWindow() {
 	loadAssetsOnce.Do(loadAssets)
 	C.ShowWindow()
+	if WindowShownHandler != nil {
+		WindowShownHandler()
+	}
 	SendBuildInfo()
 }
 
@@ -242,6 +255,14 @@ func HandleWebViewMessage(messagePtr *C.char) {
 		handleGetInstalledBrowsers()
 	case "getBrowserProfiles":
 		handleGetBrowserProfiles(msg)
+	case "makeDefaultBrowser":
+		if MakeDefaultHandler != nil {
+			MakeDefaultHandler()
+		}
+	case "openConfig", "revealConfig":
+		if OpenConfigHandler != nil {
+			OpenConfigHandler(messageType == "revealConfig")
+		}
 	default:
 		slog.Debug("Unknown message type", "type", messageType)
 	}

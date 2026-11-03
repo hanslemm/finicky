@@ -38,6 +38,21 @@ network.
    - a profile: `openApplicationAtURL:configuration:` with a new instance and the arguments
      `<profile flag> <url>`, the same as `open -n -a App --args …`.
    It waits up to 10 s for LaunchServices to finish.
+6. **Record.** `recordRecentLink` (`main.go`) adds the link, the opener and the result to the
+   recent-links list of the settings window (see [Settings window and logs](settings-window.md)).
+
+`openUrl` returns `matched: {handlerIndex, ruleIndex}` when a handler matched. `ruleIndex` exists
+only for handlers made from the JSON rules file, so the window can point at the rule.
+`browser.MatchInfo` carries it to Go; it is `nil` when the default browser was used.
+
+### Profiles
+
+`findBrowser` (`browser/discover.go`) gives the profile store of a browser: from
+`browsers.json` first, else by discovery. Discovery looks in `~/Library/Application Support`
+for a folder named after the app, the app without " Browser", or the last part of its bundle id,
+one or two levels deep (`Vendor/App`). A folder with `Local State` is Chromium-based; one with
+`profiles.ini` is Firefox-based. Results, also "not found", are cached for the process. Safari
+profiles are not supported: Safari has no command-line switch to pick one.
 
 ```diagram
 { "nodes": [

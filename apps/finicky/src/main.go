@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"sync/atomic"
@@ -75,6 +76,24 @@ var skipJSConfig bool = false
 var configInfo atomic.Pointer[ConfigInfo]
 var shouldKeepRunning bool = true
 
+// recentLinks holds the last links Finicky opened, newest first, for the
+// settings window. Memory only: never written to disk. Event loop only.
+const maxRecentLinks = 30
+
+type recentLink struct {
+	ID        uint64 `json:"id"` // unique in this process: two links can share a URL and second
+	Time      string `json:"time"`
+	URL       string `json:"url"`
+	Opener    string `json:"opener,omitempty"`
+	Browser   string `json:"browser"`
+	Profile   string `json:"profile,omitempty"`
+	Source    string `json:"source"` // "rule", "js", "default" or "error"
+	RuleIndex *int   `json:"ruleIndex,omitempty"`
+}
+
+var recentLinks []recentLink
+var recentLinkSeq uint64
+
 func main() {
 	startTime := time.Now()
 	logger.Setup()
@@ -116,6 +135,7 @@ func main() {
 	slog.Debug("Build info", "buildDate", buildDate, "commitHash", commitHash)
 
 	go func() {
+		defer reportDefaultBrowser()
 		is_default_browser, err := setDefaultBrowser()
 		if err != nil {
 			slog.Debug("Failed checking if we are the default browser", "error", err)
@@ -155,6 +175,13 @@ func main() {
 		jobs <- func() { applySavedRules(rf, namespace) }
 	}
 
+	window.MakeDefaultHandler = func() { go makeDefaultBrowser() }
+	window.OpenConfigHandler = func(reveal bool) { go openConfigFile(reveal) }
+	window.WindowShownHandler = func() {
+		go reportDefaultBrowser()
+		jobs <- func() { sendRecentLinks() }
+	}
+
 	const oneDay = 24 * time.Hour
 
 	var showingWindow bool = false
@@ -188,6 +215,7 @@ func main() {
 				} else {
 					lastError = nil
 				}
+				recordRecentLink(url, urlInfo.Opener, config, err)
 				if launchErr := browser.LaunchBrowser(*config, dryRun, urlInfo.OpenInBackground); launchErr != nil {
 					slog.Error("Failed to start browser", "error", launchErr)
 				}
@@ -338,13 +366,115 @@ func TestURLInternal(urlString string) {
 		return
 	}
 
+	source, ruleIndex := matchSource(config, nil)
 	window.SendMessageToWebView("testUrlResult", map[string]interface{}{
 		"url":              config.URL,
 		"browser":          config.Name,
 		"openInBackground": config.OpenInBackground,
 		"profile":          config.Profile,
 		"args":             config.Args,
+		"source":           source,
+		"ruleIndex":        ruleIndex,
+		"handlerIndex":     handlerIndex(config),
 	})
+}
+
+// matchSource says what decided a URL: a JSON rule ("rule", with its index),
+// a JS config handler ("js"), the default browser ("default"), or an error.
+func matchSource(config *browser.BrowserConfig, err error) (string, *int) {
+	switch {
+	case err != nil:
+		return "error", nil
+	case config.Matched == nil:
+		return "default", nil
+	case config.Matched.RuleIndex != nil:
+		return "rule", config.Matched.RuleIndex
+	default:
+		return "js", nil
+	}
+}
+
+func handlerIndex(config *browser.BrowserConfig) *int {
+	if config.Matched == nil {
+		return nil
+	}
+	return &config.Matched.HandlerIndex
+}
+
+// recordRecentLink runs on the event loop after each URL.
+func recordRecentLink(url string, opener *resolver.OpenerInfo, config *browser.BrowserConfig, err error) {
+	source, ruleIndex := matchSource(config, err)
+	recentLinkSeq++
+	link := recentLink{
+		ID:        recentLinkSeq,
+		Time:      time.Now().Format(time.RFC3339),
+		URL:       url,
+		Browser:   config.Name,
+		Profile:   config.Profile,
+		Source:    source,
+		RuleIndex: ruleIndex,
+	}
+	if opener != nil {
+		link.Opener = opener.Name
+	}
+	recentLinks = append([]recentLink{link}, recentLinks...)
+	if len(recentLinks) > maxRecentLinks {
+		recentLinks = recentLinks[:maxRecentLinks]
+	}
+	sendRecentLinks()
+}
+
+func sendRecentLinks() {
+	list := make([]recentLink, len(recentLinks))
+	copy(list, recentLinks)
+	window.SendMessageToWebView("recentLinks", list)
+}
+
+// openConfigFile opens the active config (JS file or rules.json) in its
+// default app, or shows it in Finder. The path comes from Finicky itself, never
+// from the window.
+func openConfigFile(reveal bool) {
+	ci := configInfo.Load()
+	path := ""
+	if ci != nil {
+		path = ci.ConfigPath
+	}
+	if path == "" {
+		path, _ = rules.GetPath()
+	}
+	if _, err := os.Stat(path); err != nil {
+		slog.Warn("No config file to open", "path", path)
+		return
+	}
+	args := []string{path}
+	if reveal {
+		args = []string{"-R", path}
+	}
+	if err := exec.Command("open", args...).Run(); err != nil {
+		slog.Warn("Failed to open config file", "path", path, "error", err)
+	}
+}
+
+// reportDefaultBrowser tells the window whether Finicky handles http, https
+// and finicky links. It only reads Launch Services, so any goroutine may call it.
+func reportDefaultBrowser() {
+	isDefault, _ := isDefaultBrowser()
+	window.SendMessageToWebView("defaultBrowserStatus", map[string]interface{}{"isDefault": isDefault})
+}
+
+// makeDefaultBrowser asks macOS to make Finicky the default browser. macOS
+// shows a confirmation dialog, so poll the result for up to 30 s.
+func makeDefaultBrowser() {
+	if _, err := setDefaultBrowser(); err != nil {
+		slog.Warn("Failed to set Finicky as default browser", "error", err)
+	}
+	for i := 0; i < 30; i++ {
+		time.Sleep(time.Second)
+		if isDefault, _ := isDefaultBrowser(); isDefault {
+			break
+		}
+	}
+	reportDefaultBrowser()
 }
 
 func handleFatalError(errorMessage string) {
@@ -503,10 +633,11 @@ func setupVM(cfw *config.ConfigFileWatcher, namespace string) (*config.VM, error
 		"configPath":     util.ShortenPath(ci.ConfigPath),
 		"isJSConfig":     newVM.IsJSConfig(),
 		"options": map[string]interface{}{
-			"keepRunning":     opts.KeepRunning,
-			"hideIcon":        opts.HideIcon,
-			"logRequests":     opts.LogRequests,
-			"checkForUpdates": opts.CheckForUpdates,
+			"keepRunning":      opts.KeepRunning,
+			"hideIcon":         opts.HideIcon,
+			"logRequests":      opts.LogRequests,
+			"checkForUpdates":  opts.CheckForUpdates,
+			"resolveShortUrls": opts.ResolveShortURLs,
 		},
 	})
 

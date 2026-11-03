@@ -310,3 +310,32 @@ func TestResolveURL_MergedConfigFollowsRulesChange(t *testing.T) {
 		t.Fatalf("after removing rule: got %q, want Safari", got)
 	}
 }
+
+// The result names the JSON rule that matched, also behind JS handlers and
+// when an earlier JSON rule is skipped (no browser).
+func TestResolveURL_ReportsMatchedRule(t *testing.T) {
+	vm := jsVM(t, `({ defaultBrowser: "Safari", handlers: [{ match: "*github.com*", browser: "Firefox" }] })`)
+	SetCachedRules(rules.RulesFile{Rules: []rules.Rule{
+		{Match: []string{"*skipped.dev*"}, Browser: ""},
+		{Match: []string{"*linear.app*"}, Browser: "Google Chrome"},
+	}})
+	t.Cleanup(func() { SetCachedRules(rules.RulesFile{}) })
+
+	r, err := ResolveURL(vm, "https://linear.app/x", nil, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r.Matched == nil || r.Matched.RuleIndex == nil || *r.Matched.RuleIndex != 1 || r.Matched.HandlerIndex != 1 {
+		t.Fatalf("matched = %+v, want handler 1, rule 1", r.Matched)
+	}
+
+	r, _ = ResolveURL(vm, "https://github.com/x", nil, false)
+	if r.Matched == nil || r.Matched.RuleIndex != nil || r.Matched.HandlerIndex != 0 {
+		t.Fatalf("JS handler: matched = %+v, want handler 0 and no rule", r.Matched)
+	}
+
+	r, _ = ResolveURL(vm, "https://example.com", nil, false)
+	if r.Matched != nil {
+		t.Fatalf("default: matched = %+v, want nil", r.Matched)
+	}
+}

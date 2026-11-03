@@ -10,6 +10,12 @@ export interface Toast {
   duration?: number;
   timeoutId?: number;
   key?: number; // Used to force animation restart
+  action?: ToastAction;
+}
+
+export interface ToastAction {
+  label: string;
+  run: () => void;
 }
 
 const MAX_TOASTS = 3;
@@ -18,7 +24,13 @@ const DEFAULT_DURATION = 3000;
 function createToastStore() {
   const { subscribe, update } = writable<Toast[]>([]);
 
-  function show(message: string, type: ToastType = "info", extra?: string, duration = DEFAULT_DURATION) {
+  function show(
+    message: string,
+    type: ToastType = "info",
+    extra?: string,
+    duration = DEFAULT_DURATION,
+    action?: ToastAction
+  ) {
     let id: string;
     let timeoutId: number;
 
@@ -50,7 +62,7 @@ function createToastStore() {
           remove(id);
         }, duration) as unknown as number;
 
-        const newToast: Toast = { id, message, extra, type, duration, timeoutId, key: Date.now() };
+        const newToast: Toast = { id, message, extra, type, duration, timeoutId, key: Date.now(), action };
         const updatedToasts = [...toasts, newToast];
 
         // Limit max toasts (remove oldest)
@@ -93,10 +105,13 @@ function createToastStore() {
   return {
     subscribe,
     show,
-    success: (message: string, duration?: number) => show(message, "success", duration),
+    success: (message: string, duration?: number) => show(message, "success", undefined, duration),
     error: (message: string, error: string, duration?: number) => show(message, "error", error, duration),
-    info: (message: string, duration?: number) => show(message, "info", duration),
-    warning: (message: string, duration?: number) => show(message, "warning", duration),
+    info: (message: string, duration?: number) => show(message, "info", undefined, duration),
+    warning: (message: string, duration?: number) => show(message, "warning", undefined, duration),
+    /** A toast with one action button, for example "Undo". */
+    action: (message: string, action: ToastAction, duration = 6000) =>
+      show(message, "info", undefined, duration, action),
     remove,
     clear,
   };

@@ -9,6 +9,7 @@ export interface ConfigOptions {
   hideIcon: boolean;
   logRequests: boolean;
   checkForUpdates: boolean;
+  resolveShortUrls: boolean;
 }
 
 export interface RulesFile {
@@ -60,4 +61,23 @@ export interface ConfigInfo {
   rewrites?: number;
   defaultBrowser?: string;
   options?: Partial<ConfigOptions>;
+}
+
+/** What decided where a link opened. */
+export type MatchSource = "rule" | "js" | "default" | "error";
+
+/** One link that Finicky opened, newest first. Kept in memory by the app only. */
+export interface RecentLink {
+  id: number;
+  time: string;
+  url: string;
+  opener?: string;
+  browser: string;
+  profile?: string;
+  source: MatchSource;
+  ruleIndex?: number;
+}
+
+export interface DefaultBrowserStatus {
+  isDefault: boolean;
 }

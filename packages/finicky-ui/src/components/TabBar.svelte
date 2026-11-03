@@ -1,72 +1,63 @@
 <script lang="ts">
-  import { Link } from "svelte-routing";
+  import type { Component } from "svelte";
   import PreferencesIcon from "./icons/Preferences.svelte";
-  import TestIcon from "./icons/Test.svelte";
+  import OverviewIcon from "./icons/Overview.svelte";
   import LogsIcon from "./icons/Logs.svelte";
   import AboutIcon from "./icons/About.svelte";
   import RulesIcon from "./icons/Rules.svelte";
+  import { router, type Tab } from "../lib/router.svelte";
 
-  export let numErrors: number = 0;
+  let { numErrors = 0, needsAttention = false }: { numErrors?: number; needsAttention?: boolean } = $props();
 
-  const tabs = [
-    {
-      path: "/",
-      label: "Preferences",
-      component: PreferencesIcon,
-    },
-    {
-      path: "/rules",
-      label: "Rules",
-      component: RulesIcon,
-    },
-    {
-      path: "/test",
-      label: "Test",
-      component: TestIcon,
-    },
-  ];
+  type TabDef = { tab: Tab; label: string; icon: Component; showErrors?: boolean; attention?: boolean };
 
-  const bottomTabs = [
-    {
-      path: "/troubleshoot",
-      label: "Logs",
-      showErrors: true,
-      component: LogsIcon,
-    },
-    {
-      path: "/about",
-      label: "About",
-      component: AboutIcon,
-    },
+  const tabs: TabDef[] = $derived([
+    { tab: "overview", label: "Overview", icon: OverviewIcon, attention: needsAttention },
+    { tab: "rules", label: "Rules", icon: RulesIcon },
+    { tab: "settings", label: "Settings", icon: PreferencesIcon },
+  ]);
+
+  const bottomTabs: TabDef[] = [
+    { tab: "logs", label: "Logs", icon: LogsIcon, showErrors: true },
+    { tab: "about", label: "About", icon: AboutIcon },
   ];
 </script>
 
+{#snippet tabLink(t: TabDef, small: boolean)}
+  {@const active = router.tab === t.tab}
+  <a
+    href="#{t.tab}"
+    class="tab-content"
+    class:active
+    class:tab-small={small}
+    aria-current={active ? "page" : undefined}
+  >
+    <span class="icon-container">
+      <t.icon />
+      {#if t.showErrors && numErrors > 0}
+        <span class="error-badge" aria-hidden="true">{numErrors}</span>
+      {/if}
+    </span>
+    <span>{t.label}</span>
+    {#if t.attention}
+      <span class="attention-dot" aria-hidden="true"></span>
+      <span class="sr-only">, needs attention</span>
+    {/if}
+    {#if t.showErrors && numErrors > 0}
+      <span class="sr-only">, {numErrors} {numErrors === 1 ? "error" : "errors"}</span>
+    {/if}
+  </a>
+{/snippet}
+
 <div class="tab-container">
-  <nav class="tab-bar">
-    {#each tabs as tab}
-      <Link to={tab.path} let:active>
-        <div class:active class="tab-content">
-          <div class="icon-container">
-            <svelte:component this={tab.component} />
-          </div>
-          <span>{tab.label}</span>
-        </div>
-      </Link>
+  <nav class="tab-bar" aria-label="Sections">
+    {#each tabs as t}
+      {@render tabLink(t, false)}
     {/each}
     <div class="spacer"></div>
     <div class="bottom-tabs">
-      {#each bottomTabs as tab}
-        <Link to={tab.path} let:active>
-          <div class:active class="tab-content tab-small">
-            <div class="icon-container">
-              <svelte:component this={tab.component} />
-              {#if tab.showErrors && numErrors > 0}
-                <div class="error-badge">{numErrors}</div>
-              {/if}
-            </div>
-            <span>{tab.label}</span>
-          </div>
-        </Link>
+      {#each bottomTabs as t}
+        {@render tabLink(t, true)}
       {/each}
     </div>
   </nav>
@@ -98,9 +89,6 @@
     background: transparent;
     padding: 0;
     margin: 0;
-    :global(a) {
-      text-decoration: none;
-    }
   }
 
   .spacer {
@@ -130,6 +118,8 @@
     text-align: left;
     font-size: 0.925em;
     font-weight: 400;
+    text-decoration: none;
+    box-sizing: border-box;
 
     &:hover {
       background: var(--nav-hover);
@@ -159,13 +149,21 @@
     justify-content: flex-start;
   }
 
+  .attention-dot {
+    width: 7px;
+    height: 7px;
+    margin-left: auto;
+    border-radius: 50%;
+    background: var(--log-warning);
+  }
+
   .error-badge {
     position: absolute;
     top: -8px;
     right: -8px;
     background: var(--log-error);
-    color: white;
-    border-radius: 50%;
+    color: #fff;
+    border-radius: 9px;
     min-width: 18px;
     height: 18px;
     display: flex;

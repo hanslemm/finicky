@@ -24,6 +24,14 @@ var browsersJsonData []byte
 type BrowserResult struct {
 	Browser BrowserConfig `json:"browser"`
 	Error   string        `json:"error"`
+	Matched *MatchInfo    `json:"matched"`
+}
+
+// MatchInfo says which handler decided a URL. RuleIndex is set only when the
+// handler came from the JSON rules file; it is the index of that rule.
+type MatchInfo struct {
+	HandlerIndex int  `json:"handlerIndex"`
+	RuleIndex    *int `json:"ruleIndex,omitempty"`
 }
 
 type BrowserConfig struct {
@@ -33,6 +41,8 @@ type BrowserConfig struct {
 	Profile          string   `json:"profile"`
 	Args             []string `json:"args"`
 	URL              string   `json:"url"`
+	// Matched is nil when no handler matched (the default browser was used).
+	Matched *MatchInfo `json:"-"`
 }
 
 type browserInfo struct {
@@ -188,22 +198,12 @@ func resolveBrowserProfileArgs(identifier string, profile string) ([]string, boo
 	if profile == "" {
 		return nil, false
 	}
-	browsersJson := knownBrowsers()
-
-	// Try to find matching browser by bundle ID
-	var matchedBrowser *browserInfo
-	for i := range browsersJson {
-		if browsersJson[i].ID == identifier || browsersJson[i].AppName == identifier {
-			matchedBrowser = &browsersJson[i]
-			break
-		}
-	}
-
+	matchedBrowser := findBrowser(identifier)
 	if matchedBrowser == nil {
 		return nil, false
 	}
 
-	slog.Debug("Browser found in browsers.json", "identifier", identifier, "type", matchedBrowser.Type)
+	slog.Debug("Browser profile store found", "identifier", identifier, "type", matchedBrowser.Type)
 
 	if profile != "" {
 		switch matchedBrowser.Type {
@@ -375,18 +375,11 @@ func parseProfiles(localStatePath string, profile string) (string, bool) {
 }
 
 // GetProfilesForBrowser returns available profile names for a given browser app name or bundle ID.
-// Returns empty slice if browser not in browsers.json, not supported, or profile files are unreadable.
+// It knows the browsers in browsers.json and discovers other Chromium- and
+// Firefox-based browsers (see discover.go). Returns an empty slice when the
+// browser has no profile store or its profile file is unreadable.
 func GetProfilesForBrowser(identifier string) []string {
-	browsersJson := knownBrowsers()
-
-	var matchedBrowser *browserInfo
-	for i := range browsersJson {
-		if browsersJson[i].ID == identifier || browsersJson[i].AppName == identifier {
-			matchedBrowser = &browsersJson[i]
-			break
-		}
-	}
-
+	matchedBrowser := findBrowser(identifier)
 	if matchedBrowser == nil {
 		return []string{}
 	}

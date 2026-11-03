@@ -1,16 +1,18 @@
 <script lang="ts">
-  import { Router, Route } from "svelte-routing";
   import LogViewer from "./pages/LogViewer.svelte";
-  import StartPage from "./pages/StartPage.svelte";
+  import Overview from "./pages/Overview.svelte";
+  import Settings from "./pages/Settings.svelte";
   import TabBar from "./components/TabBar.svelte";
   import About from "./pages/About.svelte";
-  import TestUrl from "./pages/TestUrl.svelte";
   import Rules from "./pages/Rules.svelte";
   import ToastContainer from "./components/ToastContainer.svelte";
-  import ExternalIcon from "./components/icons/External.svelte";
-  import type { LogEntry, UpdateInfo, ConfigInfo, RulesFile } from "./types";
+  import type { LogEntry, UpdateInfo, ConfigInfo, RulesFile, RecentLink } from "./types";
   import { testUrlResult } from "./lib/testUrlStore";
   import { toast } from "./lib/toast";
+  import { router } from "./lib/router.svelte";
+
+  // The Go side keeps the last 1000 log lines too; keep the same bound here.
+  const MAX_LOG_ENTRIES = 1000;
 
   function basename(path: string): string {
     return path.split("/").pop() || path;
@@ -20,34 +22,43 @@
     toast.show(label, "info", `${description}\n${path}`, 5000);
   }
 
-  let version = "v0.0.0";
-  let buildInfo = "dev";
+  let version = $state("v0.0.0");
 
   // Configuration state
-  let hasConfig = false;
-  let config: ConfigInfo = { configPath: "" };
-  // Initialize message buffer
-  let messageBuffer: LogEntry[] = [];
-  let updateInfo: UpdateInfo | null = null;
-  let rulesFile: RulesFile = { defaultBrowser: "", rules: [] };
-  let installedBrowsers: string[] = [];
-  let profilesByBrowser: Record<string, string[]> = {};
+  let hasConfig = $state(false);
+  let config = $state<ConfigInfo>({ configPath: "" });
+  let messageBuffer = $state.raw<LogEntry[]>([]);
+  let updateInfo = $state<UpdateInfo | null>(null);
+  let rulesFile = $state<RulesFile>({ defaultBrowser: "", rules: [] });
+  let installedBrowsers = $state<string[]>([]);
+  let profilesByBrowser = $state<Record<string, string[]>>({});
+  let recentLinks = $state.raw<RecentLink[]>([]);
+  let isDefaultBrowser = $state<boolean | null>(null);
 
-  // Reactive declaration to count errors in messageBuffer
-  $: numErrors = messageBuffer.filter(
-    (msg) => msg.level.toLowerCase() === "error"
-  ).length;
+  // A rules file counts as a configuration, the same as a JS config file.
+  const configured = $derived(hasConfig || !!rulesFile.path);
 
-  // Function to handle messages from the native app
+  const numErrors = $derived(
+    messageBuffer.filter((msg) => msg.level?.toLowerCase() === "error").length
+  );
+
+  function appendLog(entry: LogEntry) {
+    const next =
+      messageBuffer.length >= MAX_LOG_ENTRIES
+        ? messageBuffer.slice(messageBuffer.length - MAX_LOG_ENTRIES + 1)
+        : messageBuffer.slice();
+    next.push(entry);
+    messageBuffer = next;
+  }
+
+  // Handle a message from the native app.
   function handleMessage(msg: any) {
     const parsedMsg = typeof msg === "string" ? JSON.parse(msg) : msg;
-    console.log("Received message:", parsedMsg.type, parsedMsg);
     switch (parsedMsg.type) {
       case "version":
         version = parsedMsg.message;
         break;
       case "buildInfo":
-        buildInfo = parsedMsg.message;
         break;
       case "config":
         hasConfig = true;
@@ -55,7 +66,6 @@
           config = parsedMsg.message;
         }
         break;
-
       case "updateInfo":
         updateInfo = parsedMsg.message;
         break;
@@ -69,115 +79,114 @@
         installedBrowsers = parsedMsg.message;
         break;
       case "browserProfiles":
-        profilesByBrowser = { ...profilesByBrowser, [parsedMsg.message.browser]: parsedMsg.message.profiles };
+        profilesByBrowser = {
+          ...profilesByBrowser,
+          [parsedMsg.message.browser]: parsedMsg.message.profiles,
+        };
+        break;
+      case "recentLinks":
+        recentLinks = parsedMsg.message ?? [];
+        break;
+      case "defaultBrowserStatus":
+        isDefaultBrowser = !!parsedMsg.message?.isDefault;
         break;
       case "saveRulesError":
-        toast.show("Failed to save rules", "error", parsedMsg.message?.error ?? "Unknown error");
+        toast.show("Rules not saved", "error", parsedMsg.message?.error ?? "Unknown error");
         break;
       default: {
-        const newMessage = parsedMsg.message
-          ? JSON.parse(parsedMsg.message)
-          : parsedMsg;
-        messageBuffer = [...messageBuffer, newMessage];
+        const entry = parsedMsg.message ? JSON.parse(parsedMsg.message) : parsedMsg;
+        appendLog(entry);
       }
     }
   }
 
-  // Clear all logs
   function clearAllLogs() {
     messageBuffer = [];
   }
 
-  // Capture any messages buffered by the WKUserScript stub before Svelte loaded.
-  const _preloadQueue: any[] = window.finicky._queue ?? [];
+  // Messages buffered by the WKUserScript stub before Svelte loaded. Without
+  // the native host (npm run dev in a browser) there is no stub.
+  const preloadQueue: any[] = window.finicky?._queue ?? [];
 
-  // Replace the stub with the real implementation.
   window.finicky = {
     sendMessage: (msg: any) => {
-      window.webkit?.messageHandlers?.finicky?.postMessage(
-        JSON.stringify(msg)
-      );
+      window.webkit?.messageHandlers?.finicky?.postMessage(JSON.stringify(msg));
     },
     receiveMessage: handleMessage,
   };
 
-  // Drain messages that arrived before the Svelte app was ready.
-  for (const msg of _preloadQueue) {
+  for (const msg of preloadQueue) {
     handleMessage(msg);
   }
 
-  // Request rules file info on startup so the footer badge appears immediately.
+  // Each page starts at its top.
+  let scroller: HTMLElement | undefined = $state();
+  $effect(() => {
+    router.tab;
+    scroller?.scrollTo({ top: 0 });
+  });
+
+  // Ask for the rules file at start so the footer and start page are correct.
   window.finicky.sendMessage({ type: "getRules" });
   window.finicky.sendMessage({ type: "getInstalledBrowsers" });
 </script>
 
-<Router>
-  <main>
-    <div class="layout">
-      <TabBar {numErrors} />
-      <div class="container">
-        <div class="content">
-          <Route path="/">
-            <StartPage
-              {hasConfig}
-              {updateInfo}
-              {config}
-              {numErrors}
-              {rulesFile}
-              {installedBrowsers}
-              {profilesByBrowser}
-              isJSConfig={config.isJSConfig ?? false}
-            />
-          </Route>
-
-          <Route path="/troubleshoot">
-            <LogViewer {messageBuffer} onClearLogs={clearAllLogs} />
-          </Route>
-
-          <Route path="/test">
-            <TestUrl />
-          </Route>
-
-          <Route path="/about">
-            <About
-              {version}
-            />
-          </Route>
-
-          <Route path="/rules">
-            <Rules {rulesFile} {installedBrowsers} {profilesByBrowser} isJSConfig={config.isJSConfig ?? false} />
-          </Route>
-        </div>
+<main>
+  <div class="layout">
+    <TabBar {numErrors} needsAttention={isDefaultBrowser === false} />
+    <div class="container" bind:this={scroller}>
+      <div class="content">
+        {#if router.tab === "overview"}
+          <Overview
+            {configured}
+            {isDefaultBrowser}
+            {config}
+            {rulesFile}
+            {numErrors}
+            {updateInfo}
+            {recentLinks}
+          />
+        {:else if router.tab === "rules"}
+          <Rules {rulesFile} {installedBrowsers} {profilesByBrowser} {config} />
+        {:else if router.tab === "settings"}
+          <Settings {config} {rulesFile} {updateInfo} />
+        {:else if router.tab === "logs"}
+          <LogViewer {messageBuffer} onClearLogs={clearAllLogs} />
+        {:else}
+          <About {version} />
+        {/if}
       </div>
     </div>
-    <div class="footer">
-      {#if hasConfig || rulesFile.path}
-        <span class="config-label">Config loaded:</span>
-        {#if hasConfig}
-          <button class="config-badge" on:click={() => showPathToast(basename(config.configPath), "Configuration loaded from", config.configPath)}>
-            ✓ {basename(config.configPath)}
-          </button>
-        {/if}
-        {#if rulesFile.path && rulesFile.path !== config.configPath}
-          <button class="config-badge" on:click={() => showPathToast(basename(rulesFile.path!), "Configuration loaded from", rulesFile.path!)}>
-            ✓ {basename(rulesFile.path)}
-          </button>
-        {/if}
-      {:else}
-        <span class="config-status warning">No config</span>
-        <a href="https://github.com/johnste/finicky/wiki/Getting-started" target="_blank" rel="noopener noreferrer" class="config-link">
-          Get started
-          <ExternalIcon />
-        </a>
+  </div>
+  <footer class="footer">
+    {#if configured}
+      <span class="config-label">Config loaded:</span>
+      {#if hasConfig && config.configPath}
+        <button
+          class="config-badge"
+          onclick={() => showPathToast(basename(config.configPath), "Configuration loaded from", config.configPath)}
+        >
+          ✓ {basename(config.configPath)}
+        </button>
       {/if}
-      <span class="spacer"></span>
-      {#if updateInfo && updateInfo.updateCheckEnabled && !updateInfo.hasUpdate}
-        <span class="up-to-date">✓ Up to date</span>
+      {#if rulesFile.path && rulesFile.path !== config.configPath}
+        <button
+          class="config-badge"
+          onclick={() => showPathToast(basename(rulesFile.path!), "Rules loaded from", rulesFile.path!)}
+        >
+          ✓ {basename(rulesFile.path)}
+        </button>
       {/if}
-      <span class="version">{version}</span>
-    </div>
-  </main>
-</Router>
+    {:else}
+      <span class="config-status">Not set up yet</span>
+    {/if}
+    <span class="spacer"></span>
+    {#if updateInfo && updateInfo.updateCheckEnabled && !updateInfo.hasUpdate}
+      <span class="up-to-date">✓ Up to date</span>
+    {/if}
+    <span class="version">{version}</span>
+  </footer>
+</main>
 
 <ToastContainer />
 
@@ -196,7 +205,7 @@
   }
 
   .container {
-    padding: 1.25rem 1.25rem;
+    padding: 1.25rem 1.5rem;
     max-width: 100%;
     box-sizing: border-box;
     display: flex;
@@ -215,11 +224,11 @@
     background: var(--bg-nav);
     border-top: 1px solid var(--border-color);
     overflow: hidden;
+    font-size: 0.75em;
+    color: var(--text-secondary);
   }
 
   .version {
-    color: var(--text-secondary);
-    font-size: 0.75em;
     font-variant-numeric: tabular-nums;
     letter-spacing: 0.02em;
   }
@@ -233,20 +242,14 @@
   }
 
   .up-to-date {
-    color: var(--log-success);
-    font-size: 0.75em;
-  }
-
-  .config-label {
-    color: var(--text-secondary);
-    font-size: 0.75em;
+    color: var(--text-success);
   }
 
   .config-badge {
-    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-    font-size: 0.72em;
+    font-family: var(--font-mono);
+    font-size: 0.96em;
     padding: 2px 8px;
-    border-radius: 3px;
+    border-radius: 4px;
     background: transparent;
     border: none;
     color: var(--text-secondary);
@@ -260,28 +263,4 @@
     background: var(--button-hover);
     color: var(--text-primary);
   }
-
-  .config-status {
-    font-size: 0.75em;
-    color: var(--text-secondary);
-  }
-
-  .config-status.warning {
-    color: var(--log-warning);
-  }
-
-  .config-link {
-    color: var(--accent-color);
-    font-size: 0.8em;
-    text-decoration: none;
-    transition: opacity 0.2s ease;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-
-  .config-link:hover {
-    text-decoration: underline;
-  }
-
 </style>

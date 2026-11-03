@@ -12,6 +12,8 @@
     disabled = false,
     required = false,
     browserPlaceholder = "Select browser",
+    label = "Browser",
+    describedBy,
     onBrowserChange,
     onProfileChange,
     onRequestProfiles,
@@ -27,6 +29,10 @@
     disabled?: boolean;
     required?: boolean;
     browserPlaceholder?: string;
+    /** Accessible name of the browser field, for example "Browser for rule 2". */
+    label?: string;
+    /** Id of an element that explains a problem with the browser field. */
+    describedBy?: string;
     onBrowserChange?: (browser: string, profile: string, isCustom: boolean) => void;
     onProfileChange?: (profile: string, isProfileCustom: boolean) => void;
     onRequestProfiles?: (b: string) => void;
@@ -87,17 +93,23 @@
     <input
       class="browser-input"
       type="text"
-      placeholder="e.g. Firefox"
+      placeholder="App name or bundle id"
+      aria-label="{label} (app name or bundle id)"
+      aria-describedby={describedBy}
+      aria-invalid={required && !browser ? "true" : undefined}
       value={browser}
       oninput={handleBrowserInput}
       onblur={() => onSave?.()}
       {disabled}
     />
-    <button class="clear-btn" onclick={handleClearBrowser} aria-label="Clear browser"><XIcon /></button>
+    <button class="clear-btn" onclick={handleClearBrowser} aria-label="Pick from installed browsers"><XIcon /></button>
   {:else}
-    <div class="select-wrapper">
+    <div class="select-wrapper" class:empty={required && !browser}>
       <select
         class="browser-dropdown"
+        aria-label={label}
+        aria-describedby={describedBy}
+        aria-invalid={required && !browser ? "true" : undefined}
         value={browser}
         onchange={handleBrowserSelect}
         {disabled}
@@ -106,7 +118,10 @@
         {#each installedBrowsers as b}
           <option value={b}>{b}</option>
         {/each}
-        <option value={CUSTOM}>Custom...</option>
+        {#if browser && !installedBrowsers.includes(browser)}
+          <option value={browser}>{browser}</option>
+        {/if}
+        <option value={CUSTOM}>Other app…</option>
       </select>
     </div>
   {/if}
@@ -117,25 +132,27 @@
         class="browser-input"
         type="text"
         placeholder="Profile name"
+        aria-label="{label}: profile name"
         value={profile}
         oninput={handleProfileInput}
         onblur={() => onSave?.()}
         {disabled}
       />
-      <button class="clear-btn" onclick={handleClearProfile} aria-label="Clear profile"><XIcon /></button>
+      <button class="clear-btn" onclick={handleClearProfile} aria-label="Pick from profiles"><XIcon /></button>
     {:else}
-    <div class="select-wrapper" class:empty={required && !browser && !isCustom}>
+      <div class="select-wrapper profile">
         <select
           class="browser-dropdown"
+          aria-label="{label}: profile"
           value={profile}
           onchange={handleProfileSelect}
           {disabled}
         >
-          <option value="">No profile</option>
+          <option value="">Any profile</option>
           {#each profileOptions(browser) as p}
             <option value={p}>{p}</option>
           {/each}
-          <option value={CUSTOM}>Custom...</option>
+          <option value={CUSTOM}>Other profile…</option>
         </select>
       </div>
     {/if}
@@ -151,8 +168,13 @@
 
   .select-wrapper {
     position: relative;
-    flex: 1;
-    min-width: 0;
+    flex: 1 1 14ch;
+    min-width: 14ch;
+  }
+
+  .select-wrapper.profile {
+    flex: 1 1 12ch;
+    min-width: 10ch;
   }
 
   .select-wrapper::after {
@@ -186,17 +208,18 @@
     appearance: none;
   }
 
-  .browser-dropdown:focus {
-    outline: none;
+  .browser-dropdown:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
     border-color: var(--accent-color);
   }
 
   .select-wrapper.empty .browser-dropdown {
-    border-color: var(--log-warning);
+    border-color: var(--text-warning);
   }
 
   .select-wrapper.empty::after {
-    border-color: var(--log-warning);
+    border-color: var(--text-warning);
   }
 
   .browser-dropdown:disabled {
@@ -220,8 +243,9 @@
     font-family: inherit;
   }
 
-  .browser-input:focus {
-    outline: none;
+  .browser-input:focus-visible {
+    outline: 2px solid var(--focus-ring);
+    outline-offset: 1px;
     border-color: var(--accent-color);
   }
 
@@ -235,7 +259,11 @@
     border: none;
     color: var(--text-secondary);
     cursor: pointer;
-    padding: 3px;
+    padding: 5px;
+    min-width: 24px;
+    min-height: 24px;
+    align-items: center;
+    justify-content: center;
     border-radius: 4px;
     flex-shrink: 0;
     display: flex;
@@ -243,6 +271,7 @@
   }
 
   .clear-btn:hover {
-    color: var(--log-error);
+    color: var(--text-primary);
+    background: var(--bg-hover);
   }
 </style>

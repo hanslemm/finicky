@@ -74,7 +74,8 @@ void SetFileContentWithLength(const char* path, const char* content, size_t leng
     [window setTitle:@"Finicky"];
     [window center];
     [window setReleasedWhenClosed:NO];
-    [window setBackgroundColor:[NSColor colorWithCalibratedWhite:0.1 alpha:1.0]];
+    // Follow the system appearance (light or dark), like the page does.
+    [window setBackgroundColor:[NSColor windowBackgroundColor]];
 
     // Set minimum window size
     [window setMinSize:NSMakeSize(800, 500)];
@@ -121,8 +122,12 @@ void SetFileContentWithLength(const char* path, const char* content, size_t leng
     [config release]; // the web view keeps its own copy
     webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     webView.navigationDelegate = self;
-    webView.wantsLayer = true;
-    webView.layer.backgroundColor = [NSColor colorWithCalibratedWhite:0.1 alpha:1.0].CGColor;
+    // No fixed color: until the page paints, the window color shows through,
+    // so opening the window in light mode does not flash dark.
+    [webView setValue:@NO forKey:@"drawsBackground"];
+    if (@available(macOS 12.0, *)) {
+        webView.underPageBackgroundColor = [NSColor windowBackgroundColor];
+    }
 
     [webView.configuration.preferences setValue:@true forKey:@"developerExtrasEnabled"];
 
