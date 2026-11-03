@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -174,10 +175,15 @@ func (cfw *ConfigFileWatcher) BundleConfig() (string, string, error) {
 	return bundlePath, configPath, nil
 }
 
-func (cfw *ConfigFileWatcher) babelTransform(configPath string) (string, error) {
-	startTime := time.Now()
-	slog.Debug("Transforming config with babel")
+// namedGroupRe finds a regex named capturing group, "(?<name>". goja parses
+// these but does not fill in match.groups, so configs that use them need the
+// Babel plugin. Lookbehinds "(?<=" and "(?<!" do not match. A false positive
+// (for example in a comment) only costs one Babel run.
+var namedGroupRe = regexp.MustCompile(`\(\?<[A-Za-z_$]`)
 
+var babelInitOnce sync.Once
+
+func (cfw *ConfigFileWatcher) babelTransform(configPath string) (string, error) {
 	// Check if we need to transform (only if it's a .js or .mjs file)
 	ext := filepath.Ext(configPath)
 	if ext != ".js" && ext != ".mjs" {
@@ -189,15 +195,30 @@ func (cfw *ConfigFileWatcher) babelTransform(configPath string) (string, error) 
 	if err != nil {
 		return "", fmt.Errorf("error reading config file: %w", err)
 	}
+
+	// Babel in goja costs about half a second. Most configs do not need it.
+	if !namedGroupRe.Match(configBytes) {
+		slog.Debug("Skipping babel transform: no named capturing groups")
+		return configPath, nil
+	}
 	configString := string(configBytes)
 
-	babel.Init(1) // Setup transformers (can be any number > 0)
+	// The output path depends only on the input, so a cached result is valid.
+	transformedPath := GetTransformedPath(configString)
+	if _, err := os.Stat(transformedPath); err == nil {
+		slog.Debug("Using existing transformed file", "path", transformedPath)
+		return transformedPath, nil
+	}
+
+	startTime := time.Now()
+	slog.Debug("Transforming config with babel")
+
+	babelInitOnce.Do(func() { babel.Init(1) })
 	res, err := babel.Transform(strings.NewReader(configString), map[string]interface{}{
 		"plugins": []string{
 			"transform-named-capturing-groups-regex",
 		},
 	})
-
 	if err != nil {
 		return "", err
 	}
@@ -206,20 +227,8 @@ func (cfw *ConfigFileWatcher) babelTransform(configPath string) (string, error) 
 	if err != nil {
 		return "", err
 	}
-	resString := string(resBytes)
 
-	// Get a deterministic path for the transformed file
-	transformedPath := GetTransformedPath(configString)
-
-	// Check if transformed file already exists
-	if _, err := os.Stat(transformedPath); err == nil {
-		slog.Debug("Using existing transformed file", "path", transformedPath)
-		return transformedPath, nil
-	}
-
-	// Write to the persistent location
-	err = os.WriteFile(transformedPath, []byte(resString), 0644)
-	if err != nil {
+	if err := os.WriteFile(transformedPath, resBytes, 0644); err != nil {
 		return "", fmt.Errorf("error writing to transform file: %w", err)
 	}
 

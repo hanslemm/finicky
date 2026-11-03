@@ -1,6 +1,10 @@
 package version
 
-import "testing"
+import (
+	"os"
+	"strings"
+	"testing"
+)
 
 func TestIsUpdateAvailable(t *testing.T) {
 	tests := []struct {
@@ -31,5 +35,37 @@ func TestIsUpdateAvailable(t *testing.T) {
 				t.Errorf("isUpdateAvailable() = %v, want %v", got, tt.expected)
 			}
 		})
+	}
+}
+
+func TestReadCurrentVersionFromXMLPlist(t *testing.T) {
+	dir := t.TempDir()
+	plist := dir + "/Info.plist"
+	content := `<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+	<key>CFBundleName</key><string>Finicky</string>
+	<key>CFBundleVersion</key>
+	<string>4.2.2</string>
+</dict></plist>`
+	if err := os.WriteFile(plist, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUNDLE_PATH", plist)
+	if got := readCurrentVersion(); got != "4.2.2" {
+		t.Errorf("readCurrentVersion() = %q, want 4.2.2", got)
+	}
+}
+
+// The repository VERSION file (read by the docs/manual tooling) must match the
+// version the app reports, CFBundleVersion in Info.plist.
+func TestVersionFileMatchesInfoPlist(t *testing.T) {
+	file, err := os.ReadFile("../../../../VERSION")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BUNDLE_PATH", "../../assets/Info.plist")
+	want := strings.TrimSpace(string(file))
+	if got := readCurrentVersion(); got != want {
+		t.Fatalf("Info.plist CFBundleVersion = %q, VERSION = %q; update both", got, want)
 	}
 }

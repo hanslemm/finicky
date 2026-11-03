@@ -13,6 +13,15 @@ type VM struct {
 	runtime    *goja.Runtime
 	namespace  string
 	isJSConfig bool
+
+	// options is read once after the config is validated. A config change
+	// builds a new VM, so the value never goes stale.
+	options ConfigOptions
+
+	// mergedRulesGen is the JSON-rules generation that the _mergedConfig JS
+	// global was built from (see resolver). hasMerged is false until built.
+	mergedRulesGen uint64
+	hasMerged      bool
 }
 
 // ConfigOptions holds the values of all runtime config options.
@@ -21,6 +30,17 @@ type ConfigOptions struct {
 	HideIcon        bool
 	LogRequests     bool
 	CheckForUpdates bool
+	// ResolveShortURLs follows redirects of known URL shorteners before
+	// matching. It costs a network round trip on each short link.
+	ResolveShortURLs bool
+}
+
+var defaultOptions = ConfigOptions{
+	KeepRunning:      true,
+	HideIcon:         false,
+	LogRequests:      false,
+	CheckForUpdates:  true,
+	ResolveShortURLs: true,
 }
 
 // ConfigState represents the current state of the configuration
@@ -115,6 +135,7 @@ func (vm *VM) setup(apiContent []byte, content []byte) error {
 		return fmt.Errorf("configuration is invalid")
 	}
 
+	vm.options = vm.readConfigOptions()
 	return nil
 }
 
@@ -150,36 +171,48 @@ func (vm *VM) SetIsJSConfig(v bool) {
 	vm.isJSConfig = v
 }
 
-// GetAllConfigOptions reads all runtime config options in a single JS call.
-// Safe to call on a nil VM — returns defaults in that case.
+// GetAllConfigOptions returns the runtime config options. They are read from
+// JS once, when the VM is built. Safe to call on a nil VM — returns defaults.
 func (vm *VM) GetAllConfigOptions() ConfigOptions {
-	defaults := ConfigOptions{
-		KeepRunning:     true,
-		HideIcon:        false,
-		LogRequests:     false,
-		CheckForUpdates: true,
-	}
 	if vm == nil || vm.runtime == nil {
-		return defaults
+		return defaultOptions
 	}
+	return vm.options
+}
+
+func (vm *VM) readConfigOptions() ConfigOptions {
 	script := `({
-		keepRunning:     finickyConfigAPI.getOption('keepRunning',     finalConfig, true),
-		hideIcon:        finickyConfigAPI.getOption('hideIcon',        finalConfig, false),
-		logRequests:     finickyConfigAPI.getOption('logRequests',     finalConfig, false),
-		checkForUpdates: finickyConfigAPI.getOption('checkForUpdates', finalConfig, true)
+		keepRunning:      finickyConfigAPI.getOption('keepRunning',      finalConfig, true),
+		hideIcon:         finickyConfigAPI.getOption('hideIcon',         finalConfig, false),
+		logRequests:      finickyConfigAPI.getOption('logRequests',      finalConfig, false),
+		checkForUpdates:  finickyConfigAPI.getOption('checkForUpdates',  finalConfig, true),
+		resolveShortUrls: finickyConfigAPI.getOption('resolveShortUrls', finalConfig, true)
 	})`
 	val, err := vm.runtime.RunString(script)
 	if err != nil {
 		slog.Error("Failed to get config options", "error", err)
-		return defaults
+		return defaultOptions
 	}
 	obj := val.ToObject(vm.runtime)
 	return ConfigOptions{
-		KeepRunning:     obj.Get("keepRunning").ToBoolean(),
-		HideIcon:        obj.Get("hideIcon").ToBoolean(),
-		LogRequests:     obj.Get("logRequests").ToBoolean(),
-		CheckForUpdates: obj.Get("checkForUpdates").ToBoolean(),
+		KeepRunning:      obj.Get("keepRunning").ToBoolean(),
+		HideIcon:         obj.Get("hideIcon").ToBoolean(),
+		LogRequests:      obj.Get("logRequests").ToBoolean(),
+		CheckForUpdates:  obj.Get("checkForUpdates").ToBoolean(),
+		ResolveShortURLs: obj.Get("resolveShortUrls").ToBoolean(),
 	}
+}
+
+// MergedRulesGen reports which JSON-rules generation the _mergedConfig JS
+// global holds, and whether it was built at all.
+func (vm *VM) MergedRulesGen() (uint64, bool) {
+	return vm.mergedRulesGen, vm.hasMerged
+}
+
+// SetMergedRulesGen records that _mergedConfig now holds generation gen.
+func (vm *VM) SetMergedRulesGen(gen uint64) {
+	vm.mergedRulesGen = gen
+	vm.hasMerged = true
 }
 
 // Runtime returns the underlying goja.Runtime

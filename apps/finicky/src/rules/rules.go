@@ -53,10 +53,11 @@ func (r Rule) MarshalJSON() ([]byte, error) {
 }
 
 type Options struct {
-	KeepRunning     *bool `json:"keepRunning,omitempty"`
-	HideIcon        *bool `json:"hideIcon,omitempty"`
-	LogRequests     *bool `json:"logRequests,omitempty"`
-	CheckForUpdates *bool `json:"checkForUpdates,omitempty"`
+	KeepRunning      *bool `json:"keepRunning,omitempty"`
+	HideIcon         *bool `json:"hideIcon,omitempty"`
+	LogRequests      *bool `json:"logRequests,omitempty"`
+	CheckForUpdates  *bool `json:"checkForUpdates,omitempty"`
+	ResolveShortUrls *bool `json:"resolveShortUrls,omitempty"`
 }
 
 type RulesFile struct {
@@ -115,6 +116,16 @@ func LoadFromPath(path string) (RulesFile, error) {
 		rf.Rules = []Rule{}
 	}
 	return rf, nil
+}
+
+// MergeOptions returns rf with its Options taken from existing when rf has
+// none. A save payload without "options" (the rules editor sends only rules)
+// must not erase the options the Preferences page stored.
+func MergeOptions(rf RulesFile, existing RulesFile) RulesFile {
+	if rf.Options == nil {
+		rf.Options = existing.Options
+	}
+	return rf
 }
 
 // Save writes the rules file to the default path, creating the directory if needed.
@@ -217,6 +228,9 @@ func ToJSConfigScript(rf RulesFile, namespace string) (string, error) {
 	}
 	if rf.Options.CheckForUpdates != nil {
 		opts["checkForUpdates"] = *rf.Options.CheckForUpdates
+	}
+	if rf.Options.ResolveShortUrls != nil {
+		opts["resolveShortUrls"] = *rf.Options.ResolveShortUrls
 	}
 
 	optsJSON, err := json.Marshal(opts)

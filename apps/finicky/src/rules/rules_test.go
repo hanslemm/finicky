@@ -21,8 +21,8 @@ func TestToJSHandlers_Empty(t *testing.T) {
 
 func TestToJSHandlers_SkipsIncompleteRules(t *testing.T) {
 	rules := []Rule{
-		{Match: []string{""}, Browser: "Firefox"},         // no match
-		{Match: []string{"example.com"}, Browser: ""},     // no browser
+		{Match: []string{""}, Browser: "Firefox"},           // no match
+		{Match: []string{"example.com"}, Browser: ""},       // no browser
 		{Match: []string{"example.com"}, Browser: "Safari"}, // valid
 	}
 	result := ToJSHandlers(rules)
@@ -189,4 +189,22 @@ func TestLoad_EmptyRulesNotNil(t *testing.T) {
 
 func contains(s, substr string) bool {
 	return strings.Contains(s, substr)
+}
+
+func TestMergeOptionsKeepsExistingOptions(t *testing.T) {
+	keep := false
+	existing := RulesFile{Options: &Options{KeepRunning: &keep}}
+
+	// A payload with no options (the rules editor) keeps the stored options.
+	got := MergeOptions(RulesFile{DefaultBrowser: "Firefox"}, existing)
+	if got.Options == nil || got.Options.KeepRunning == nil || *got.Options.KeepRunning != false {
+		t.Fatalf("options were dropped: %+v", got.Options)
+	}
+
+	// A payload with options (the preferences page) replaces them.
+	hide := true
+	got = MergeOptions(RulesFile{Options: &Options{HideIcon: &hide}}, existing)
+	if got.Options.KeepRunning != nil || got.Options.HideIcon == nil {
+		t.Fatalf("payload options were not used: %+v", got.Options)
+	}
 }

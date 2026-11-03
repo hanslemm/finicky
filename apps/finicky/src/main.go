@@ -25,9 +25,8 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"time"
-
-	"github.com/dop251/goja"
 )
 
 //go:embed assets/finickyConfigAPI.js
@@ -51,8 +50,18 @@ type ConfigInfo struct {
 	ConfigPath     string
 }
 
-var urlListener chan URLInfo = make(chan URLInfo)
+// urlListener is buffered so the Cocoa main thread, which sends on it from
+// the Apple-event handler, does not wait while a previous URL is resolved.
+var urlListener chan URLInfo = make(chan URLInfo, 16)
 var windowClosed chan struct{} = make(chan struct{})
+
+// jobs runs work on the event-loop goroutine. The goja runtime inside vm is
+// not safe for concurrent use, so every VM access (URL resolution, test URLs,
+// VM rebuilds) goes through the event loop.
+var jobs chan func() = make(chan func(), 16)
+
+// vm is read and written only on the event-loop goroutine (and in main
+// before the loop starts).
 var vm *config.VM
 
 var forceWindowOpen bool = false
@@ -60,8 +69,10 @@ var queueWindowOpen chan bool = make(chan bool)
 var lastError error
 var dryRun bool = false
 var skipJSConfig bool = false
-var updateInfo UpdateInfo
-var configInfo *ConfigInfo
+
+// configInfo is written on the event loop and read on the Cocoa main thread
+// (menu "Edit config"), so it is an atomic pointer.
+var configInfo atomic.Pointer[ConfigInfo]
 var shouldKeepRunning bool = true
 
 func main() {
@@ -130,40 +141,18 @@ func main() {
 
 	slog.Debug("VM setup complete", "duration", fmt.Sprintf("%.2fms", float64(time.Since(startTime).Microseconds())/1000))
 
-	go checkForUpdates()
+	go checkForUpdates(vm.GetAllConfigOptions().CheckForUpdates)
 
-	// Set up test URL handler
+	// UI handlers run on the Cocoa main thread; hand the work to the event loop.
 	window.TestUrlHandler = func(url string) {
-		go TestURLInternal(url)
+		jobs <- func() { TestURLInternal(url) }
 	}
 
-	// Set up rules save handler.
 	// When there is no JS config, rebuild the VM from the updated rules.
-	// When there is a JS config, JSON rules are loaded fresh in evaluateURL — nothing to do.
+	// When there is a JS config, the resolver merges the new JSON rules on the
+	// next URL — nothing else to do.
 	window.SaveRulesHandler = func(rf rules.RulesFile) {
-		slog.Debug("Rules updated", "count", len(rf.Rules))
-		resolver.SetCachedRules(rf)
-		if vm == nil || !vm.IsJSConfig() {
-			if rf.DefaultBrowser == "" && len(rf.Rules) == 0 && rf.Options == nil {
-				vm = nil
-				return
-			}
-			script, err := rules.ToJSConfigScript(rf, namespace)
-			if err != nil {
-				slog.Error("Failed to generate config from rules", "error", err)
-				return
-			}
-			newVM, err := config.NewFromScript(finickyConfigAPIJS, namespace, script)
-			if err != nil {
-				slog.Error("Failed to rebuild VM from rules", "error", err)
-				return
-			}
-			vm = newVM
-			if vm != nil {
-				shouldKeepRunning = vm.GetAllConfigOptions().KeepRunning
-				go checkForUpdates()
-			}
-		}
+		jobs <- func() { applySavedRules(rf, namespace) }
 	}
 
 	const oneDay = 24 * time.Hour
@@ -183,6 +172,9 @@ func main() {
 		slog.Info("Listening for events...")
 		for {
 			select {
+			case job := <-jobs:
+				job()
+
 			case urlInfo := <-urlListener:
 				startTime := time.Now()
 
@@ -220,10 +212,9 @@ func main() {
 					C.SetStatusItemError(false)
 				}
 				slog.Debug("VM refresh complete", "duration", fmt.Sprintf("%.2fms", float64(time.Since(startTime).Microseconds())/1000))
-				if vm != nil {
-					shouldKeepRunning = vm.GetAllConfigOptions().KeepRunning
-					go checkForUpdates()
-				}
+				opts := vm.GetAllConfigOptions()
+				shouldKeepRunning = opts.KeepRunning
+				go checkForUpdates(opts.CheckForUpdates)
 
 			case shouldShowWindow := <-queueWindowOpen:
 				if !showingWindow && shouldShowWindow {
@@ -233,7 +224,7 @@ func main() {
 				}
 
 			case <-updateChan:
-				go checkForUpdates()
+				go checkForUpdates(vm.GetAllConfigOptions().CheckForUpdates)
 				updateChan = time.After(oneDay)
 
 			case <-windowClosed:
@@ -302,7 +293,37 @@ func HandleURL(url *C.char, name *C.char, bundleId *C.char, path *C.char, window
 //export TestURL
 func TestURL(url *C.char) {
 	urlString := C.GoString(url)
-	TestURLInternal(urlString)
+	jobs <- func() { TestURLInternal(urlString) }
+}
+
+// applySavedRules runs on the event loop after the UI saved rules.json.
+func applySavedRules(rf rules.RulesFile, namespace string) {
+	slog.Debug("Rules updated", "count", len(rf.Rules))
+	resolver.SetCachedRules(rf)
+	if vm != nil && vm.IsJSConfig() {
+		return
+	}
+	if rf.DefaultBrowser == "" && len(rf.Rules) == 0 && rf.Options == nil {
+		vm = nil
+		return
+	}
+	script, err := rules.ToJSConfigScript(rf, namespace)
+	if err != nil {
+		slog.Error("Failed to generate config from rules", "error", err)
+		return
+	}
+	newVM, err := config.NewFromScript(finickyConfigAPIJS, namespace, script)
+	if err != nil {
+		slog.Error("Failed to rebuild VM from rules", "error", err)
+		return
+	}
+	vm = newVM
+	opts := vm.GetAllConfigOptions()
+	shouldKeepRunning = opts.KeepRunning
+	if err := logger.SetupFile(opts.LogRequests); err != nil {
+		slog.Warn("Failed to setup file logging", "error", err)
+	}
+	go checkForUpdates(opts.CheckForUpdates)
 }
 
 func TestURLInternal(urlString string) {
@@ -350,31 +371,27 @@ func ShowConfigWindow() {
 
 //export WindowDidClose
 func WindowDidClose() {
+	window.MarkClosed()
 	windowClosed <- struct{}{}
 }
 
 //export GetCurrentConfigPath
 func GetCurrentConfigPath() *C.char {
-	if configInfo != nil && configInfo.ConfigPath != "" {
-		cPath := C.CString(configInfo.ConfigPath)
-		return cPath
-	} else {
-		return nil
+	if ci := configInfo.Load(); ci != nil && ci.ConfigPath != "" {
+		return C.CString(ci.ConfigPath)
 	}
+	return nil
 }
 
-func checkForUpdates() {
-	var runtime *goja.Runtime
-	if vm != nil {
-		runtime = vm.Runtime()
-	}
-
-	releaseInfo, updateCheckEnabled, err := version.CheckForUpdatesIfEnabled(runtime)
+// checkForUpdates runs on its own goroutine. It must not touch vm: the caller
+// passes the checkForUpdates option in.
+func checkForUpdates(enabled bool) {
+	releaseInfo, updateCheckEnabled, err := version.CheckForUpdatesIfEnabled(enabled)
 	if err != nil {
 		slog.Error("Error checking for updates", "error", err)
 	}
 
-	updateInfo = UpdateInfo{
+	updateInfo := UpdateInfo{
 		ReleaseInfo:        releaseInfo,
 		UpdateCheckEnabled: updateCheckEnabled,
 	}
@@ -402,8 +419,9 @@ func checkForUpdates() {
 	}
 }
 
+// tearDown exits at once. The update check already ran at start (at most
+// once a day); waiting for the network here only delayed the exit.
 func tearDown() {
-	checkForUpdates()
 	slog.Info("Exiting...")
 	os.Exit(0)
 }
@@ -467,24 +485,22 @@ func setupVM(cfw *config.ConfigFileWatcher, namespace string) (*config.VM, error
 		return nil, nil
 	}
 
-	cs := newVM.GetConfigState()
-	if cs != nil {
-		configInfo = &ConfigInfo{
-			Handlers:       cs.Handlers,
-			Rewrites:       cs.Rewrites,
-			DefaultBrowser: cs.DefaultBrowser,
-			ConfigPath:     configPath,
-		}
+	ci := &ConfigInfo{ConfigPath: configPath}
+	if cs := newVM.GetConfigState(); cs != nil {
+		ci.Handlers = cs.Handlers
+		ci.Rewrites = cs.Rewrites
+		ci.DefaultBrowser = cs.DefaultBrowser
 	}
+	configInfo.Store(ci)
 
 	opts := newVM.GetAllConfigOptions()
 	logRequests = opts.LogRequests
 
 	window.SendMessageToWebView("config", map[string]interface{}{
-		"handlers":       configInfo.Handlers,
-		"rewrites":       configInfo.Rewrites,
-		"defaultBrowser": configInfo.DefaultBrowser,
-		"configPath":     util.ShortenPath(configInfo.ConfigPath),
+		"handlers":       ci.Handlers,
+		"rewrites":       ci.Rewrites,
+		"defaultBrowser": ci.DefaultBrowser,
+		"configPath":     util.ShortenPath(ci.ConfigPath),
 		"isJSConfig":     newVM.IsJSConfig(),
 		"options": map[string]interface{}{
 			"keepRunning":     opts.KeepRunning,

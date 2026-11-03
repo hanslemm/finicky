@@ -295,9 +295,13 @@
         // Try to get the focused window title via Accessibility API
         AXUIElementRef appElement = AXUIElementCreateApplication(pid);
         if (appElement) {
+            // The default AX timeout is about 6 s. A hung source app must not
+            // delay the link, so give up quickly: the title is optional.
+            AXUIElementSetMessagingTimeout(appElement, 0.1f);
             AXUIElementRef focusedWindow = NULL;
             AXError err = AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute, (CFTypeRef *)&focusedWindow);
             if (err == kAXErrorSuccess && focusedWindow) {
+                AXUIElementSetMessagingTimeout(focusedWindow, 0.1f);
                 CFTypeRef titleValue = NULL;
                 AXError titleErr = AXUIElementCopyAttributeValue(focusedWindow, kAXTitleAttribute, &titleValue);
                 if (titleErr == kAXErrorSuccess && titleValue && CFGetTypeID(titleValue) == CFStringGetTypeID()) {

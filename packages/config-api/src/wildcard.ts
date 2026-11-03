@@ -1,8 +1,27 @@
+// Compiled patterns, keyed by the wildcard pattern. A config has a fixed set
+// of patterns, so this stays small; the cap only guards against configs that
+// build patterns dynamically. `null` caches an invalid pattern.
+const MAX_CACHED_PATTERNS = 1000;
+const compiledPatterns = new Map<string, RegExp | null>();
+
 export function matchWildcard(pattern: string, str: string): boolean {
-  try {
-    if (!pattern.includes("*")) {
-      return pattern === str;
+  if (!pattern.includes("*")) {
+    return pattern === str;
+  }
+
+  let regex = compiledPatterns.get(pattern);
+  if (regex === undefined) {
+    regex = compileWildcard(pattern);
+    if (compiledPatterns.size >= MAX_CACHED_PATTERNS) {
+      compiledPatterns.clear();
     }
+    compiledPatterns.set(pattern, regex);
+  }
+  return regex !== null && regex.test(str);
+}
+
+function compileWildcard(pattern: string): RegExp | null {
+  try {
 
     // First handle escaped asterisks by temporarily replacing them
     const ESCAPED_ASTERISK_PLACEHOLDER = "\u0000";
@@ -42,11 +61,9 @@ export function matchWildcard(pattern: string, str: string): boolean {
     );
 
     // Add start and end anchors to ensure full string match
-    const regex = new RegExp(`^${finalPattern}$`);
-
-    return regex.test(str);
+    return new RegExp(`^${finalPattern}$`);
   } catch (error) {
     console.warn("Invalid wildcard pattern:", pattern, error);
-    return false;
+    return null;
   }
 }

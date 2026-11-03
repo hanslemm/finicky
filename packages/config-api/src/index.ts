@@ -79,16 +79,25 @@ export function getConfigState(config: Config) {
   };
 }
 
+/**
+ * Decide which browser opens a URL.
+ *
+ * @param prevalidated Pass true when the host already validated this exact
+ *   config object (it does so once per config load). This skips a full zod
+ *   parse on every URL.
+ */
 export function openUrl(
   urlString: string,
   opener: ProcessInfo | null,
   originalUrlString: string | null,
-  config: object
+  config: object,
+  prevalidated = false
 ) {
   try {
-  if (!validateConfig(config)) {
+  if (!prevalidated && !validateConfig(config)) {
     throw new Error("Invalid config");
   }
+  const validConfig = config as Config;
 
   let url = new FinickyURL(urlString, opener);
 
@@ -103,16 +112,16 @@ export function openUrl(
   let error: string | undefined;
 
   try {
-    if (config.rewrite) {
-      for (const rewrite of config.rewrite) {
+    if (validConfig.rewrite) {
+      for (const rewrite of validConfig.rewrite) {
         if (isMatch(rewrite.match, url, options)) {
           url = rewriteUrl(rewrite.url, url, options);
         }
       }
     }
 
-    if (config.handlers) {
-      for (const [index, handler] of config.handlers.entries()) {
+    if (validConfig.handlers) {
+      for (const [index, handler] of validConfig.handlers.entries()) {
         if (isMatch(handler.match, url, options)) {
           return {
             browser: resolveBrowser(handler.browser, url, options),
@@ -124,7 +133,7 @@ export function openUrl(
     error = ex instanceof Error ? ex.message : String(ex);
   }
 
-  const browser = resolveBrowser(config.defaultBrowser, url, options);
+  const browser = resolveBrowser(validConfig.defaultBrowser, url, options);
 
   return {
     browser,

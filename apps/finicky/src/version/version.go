@@ -9,13 +9,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"finicky/util"
 
 	"github.com/Masterminds/semver"
-	"github.com/dop251/goja"
 )
 
 const updateCheckInterval = 24 * time.Hour
@@ -96,8 +97,23 @@ func setLastUpdateCheck(info UpdateCheckInfo) {
 	}
 }
 
+var (
+	currentVersionOnce sync.Once
+	currentVersion     string
+)
+
+var plistVersionRe = regexp.MustCompile(`<key>CFBundleVersion</key>\s*<string>([^<]*)</string>`)
+
+// GetCurrentVersion returns CFBundleVersion from the app's Info.plist.
+// The value is read once per process: it cannot change while the app runs.
 func GetCurrentVersion() string {
-	// Get the bundle path
+	currentVersionOnce.Do(func() {
+		currentVersion = readCurrentVersion()
+	})
+	return currentVersion
+}
+
+func readCurrentVersion() string {
 	bundlePath := os.Getenv("BUNDLE_PATH")
 	if bundlePath == "" {
 		execPath, err := os.Executable()
@@ -105,25 +121,29 @@ func GetCurrentVersion() string {
 			slog.Error("Error getting executable path", "error", err)
 			return ""
 		}
-
 		bundlePath = filepath.Join(filepath.Dir(execPath), "..", "Info.plist")
 	}
 
-	// Read and parse Info.plist
-	cmd := exec.Command("defaults", "read", bundlePath, "CFBundleVersion")
-	output, err := cmd.Output()
+	// Fast path: the shipped Info.plist is XML, so read it directly.
+	if data, err := os.ReadFile(bundlePath); err == nil {
+		if m := plistVersionRe.FindSubmatch(data); m != nil {
+			if v := strings.TrimSpace(string(m[1])); v != "" {
+				return v
+			}
+		}
+	}
+
+	// Slow path: binary plist or unusual layout. `defaults` reads every format.
+	output, err := exec.Command("defaults", "read", bundlePath, "CFBundleVersion").Output()
 	if err != nil {
 		slog.Error("Error reading version from Info.plist", "error", err)
 		return ""
 	}
-
 	version := strings.TrimSpace(string(output))
-
 	if version == "" {
 		slog.Error("Could not determine current version")
 		return "dev"
 	}
-
 	return version
 }
 
@@ -234,8 +254,10 @@ func checkForUpdates() (releaseInfo *ReleaseInfo) {
 	return releaseInfo
 }
 
-// CheckForUpdatesIfEnabled checks if updates should be performed based on VM configuration
-func CheckForUpdatesIfEnabled(vm *goja.Runtime) (releaseInfo *ReleaseInfo, updateCheckEnabled bool, err error) {
+// CheckForUpdatesIfEnabled checks for updates when enabled is true (the
+// checkForUpdates config option). It does not touch the JS VM, so it is safe
+// to call from any goroutine.
+func CheckForUpdatesIfEnabled(enabled bool) (releaseInfo *ReleaseInfo, updateCheckEnabled bool, err error) {
 	if mockVersion := os.Getenv("FINICKY_MOCK_UPDATE"); mockVersion != "" {
 		slog.Info("FINICKY_MOCK_UPDATE set, returning mock update", "version", mockVersion)
 		mockTag := strings.TrimPrefix(mockVersion, "v")
@@ -247,25 +269,11 @@ func CheckForUpdatesIfEnabled(vm *goja.Runtime) (releaseInfo *ReleaseInfo, updat
 		}, true, nil
 	}
 
-	if vm == nil {
-		// Check for updates if we don't have a VM
-		releaseInfo := checkForUpdates()
-		return releaseInfo, true, nil
-	}
-
-	// Check checkForUpdates option
-	shouldCheckForUpdates, err := vm.RunString("finickyConfigAPI.getOption('checkForUpdates', finalConfig, true)")
-	if err != nil {
-		return nil, true, fmt.Errorf("failed to get checkForUpdates option: %v", err)
-	}
-
-	if shouldCheckForUpdates.ToBoolean() {
-		releaseInfo := checkForUpdates()
-		return releaseInfo, true, nil
-	} else {
+	if !enabled {
 		slog.Debug("Skipping update check")
+		return nil, false, nil
 	}
-	return nil, false, nil
+	return checkForUpdates(), true, nil
 }
 
 // isUpdateAvailable checks if the latest version is newer than the current version

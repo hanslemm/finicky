@@ -277,3 +277,36 @@ func TestResolveURL_OpenInBackground(t *testing.T) {
 		t.Error("expected OpenInBackground=true")
 	}
 }
+
+// The merged JS+JSON config is cached per VM. A rules change must still take
+// effect on the next URL, on the same VM.
+func TestResolveURL_MergedConfigFollowsRulesChange(t *testing.T) {
+	vm := jsVM(t, `({ defaultBrowser: "Safari", handlers: [] })`)
+	t.Cleanup(func() { SetCachedRules(rules.RulesFile{}) })
+
+	resolve := func() string {
+		t.Helper()
+		result, err := ResolveURL(vm, "https://linear.app/x", nil, false)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result.Name
+	}
+
+	SetCachedRules(rules.RulesFile{})
+	if got := resolve(); got != "Safari" {
+		t.Fatalf("before rules: got %q, want Safari", got)
+	}
+
+	SetCachedRules(rules.RulesFile{Rules: []rules.Rule{
+		{Match: []string{"linear.app/*"}, Browser: "Google Chrome"},
+	}})
+	if got := resolve(); got != "Google Chrome" {
+		t.Fatalf("after adding rule: got %q, want Google Chrome", got)
+	}
+
+	SetCachedRules(rules.RulesFile{})
+	if got := resolve(); got != "Safari" {
+		t.Fatalf("after removing rule: got %q, want Safari", got)
+	}
+}

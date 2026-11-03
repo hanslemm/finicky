@@ -54,9 +54,12 @@ build_arch() {
     export CGO_ENABLED=1
     export CC=clang
 
-    go build -C apps/finicky/src \
+    # -s -w: drop the symbol table and DWARF debug data (about a quarter of
+    # the binary). -trimpath: no local paths in the binary.
+    go build -C apps/finicky/src -trimpath \
         -ldflags \
-        "-X 'finicky/version.commitHash=${COMMIT_HASH}' \
+        "-s -w \
+        -X 'finicky/version.commitHash=${COMMIT_HASH}' \
         -X 'finicky/version.buildDate=${BUILD_DATE}' \
         -X 'finicky/version.apiHost=${API_HOST}'" \
         -o ../build/${APP_NAME}/Contents/MacOS/Finicky
