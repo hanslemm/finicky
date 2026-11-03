@@ -47,6 +47,21 @@ it with Launch Services (`post_install`). `/Applications/Finicky.app` is a symbo
 The Homebrew cask `finicky` installs the upstream app. Do not install both: the cask's
 uninstall deletes `/Applications/Finicky.app`.
 
+### Continuous integration
+
+`.github/workflows/macos-build.yml` runs on each push to `main`, on each PR to `main`, and by
+hand (`workflow_dispatch`). It is the only workflow.
+
+| Job | What it does | Where it runs |
+| --- | --- | --- |
+| `build-macos` | Builds the universal app, then runs `go test ./...`, `npx vitest run` (config API) and `npm run check` (UI). Uploads the app as a 14-day artifact. | Every repository |
+| `sign-and-notarize` | Signs with the Developer ID certificate and notarizes with `gon`. | Only `johnste/finicky`, because only upstream has the secrets |
+
+- The token is read-only (`permissions: contents: read`).
+- Each action is pinned to a commit SHA, with the tag in a comment.
+- `concurrency` stops the older run when a new commit comes to the same branch or PR.
+- A fork runs no workflow until its owner turns workflows on once in the Actions tab.
+
 ### Binary size
 
 | Build (arm64) | Size |
@@ -100,4 +115,4 @@ The largest parts are goja, esbuild's Go API and goja-babel (it embeds `babel.js
 
 - `scripts/build.sh`, `scripts/install.sh`, `scripts/test.sh`, `scripts/dev.sh`
 - `apps/finicky/src/version/version.go`
-- `.github/workflows/macos-build.yml`
+- `.github/workflows/macos-build.yml` (the only workflow; the old `nodejs.yml` is removed)
