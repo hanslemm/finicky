@@ -78,6 +78,13 @@ export interface RecentLink {
   ruleIndex?: number;
 }
 
+/** What the app knows about one browser's profiles. */
+export interface ProfileStatus {
+  supported: boolean;
+  /** macOS refused the read of the profile list. */
+  blocked: boolean;
+}
+
 export interface DefaultBrowserStatus {
   isDefault: boolean;
 }

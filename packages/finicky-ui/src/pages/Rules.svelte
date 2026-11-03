@@ -4,7 +4,7 @@
   import BrowserProfileSelector from "../components/BrowserProfileSelector.svelte";
   import WarningIcon from "../components/icons/Warning.svelte";
   import XIcon from "../components/icons/X.svelte";
-  import type { ConfigInfo, Rule, RulesFile } from "../types";
+  import type { ConfigInfo, ProfileStatus, Rule, RulesFile } from "../types";
   import { toast } from "../lib/toast";
   import { draft } from "../lib/draftRule.svelte";
   import { testUrlInput, testUrlResult } from "../lib/testUrlStore";
@@ -13,11 +13,13 @@
     rulesFile = { defaultBrowser: "", rules: [] },
     installedBrowsers = [],
     profilesByBrowser = {},
+    profileStatus = {},
     config,
   }: {
     rulesFile: RulesFile;
     installedBrowsers: string[];
     profilesByBrowser: Record<string, string[]>;
+    profileStatus?: Record<string, ProfileStatus>;
     config: ConfigInfo;
   } = $props();
 
@@ -445,6 +447,7 @@
                   isProfileCustom={rowProfileIsCustom[i]}
                   {installedBrowsers}
                   {profilesByBrowser}
+                  {profileStatus}
                   required
                   label="Browser for rule {i + 1}"
                   describedBy={missingBrowser ? `missing-${i}` : undefined}
@@ -503,6 +506,7 @@
           isProfileCustom={defaultProfileIsCustom}
           {installedBrowsers}
           {profilesByBrowser}
+          {profileStatus}
           label="Default browser"
           browserPlaceholder="Safari"
           onBrowserChange={(browser, profile) => {

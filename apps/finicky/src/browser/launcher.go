@@ -6,10 +6,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -82,22 +84,14 @@ func LaunchBrowser(config BrowserConfig, dryRun bool, openInBackgroundByDefault 
 	profileArgs, ok := resolveBrowserProfileArgs(config.Name, config.Profile)
 	hasCustomArgs := len(config.Args) > 0
 
-	// Fast path: ask LaunchServices directly. Custom args can hold `open`
-	// flags (for example "--args"), so only `open` can honour them.
-	if !hasCustomArgs {
-		var nativeArgs []string
-		passURL := true
-		if ok {
-			// Profile switching: launch a new instance with the profile and
-			// the URL as arguments, like `open -n -a App --args <profile> <url>`.
-			nativeArgs = append(append([]string{}, profileArgs...), config.URL)
-			passURL = false
-		}
+	// Fast path: ask LaunchServices directly, when the request has a native
+	// equivalent (see nativePlan). Otherwise only `open` can honour it.
+	if plan, native := nativePlan(config.Args, profileArgs, ok, config.URL, openInBackground); native {
 		if dryRun {
-			slog.Debug("Would open natively (dry run)", "app", config.Name, "url", config.URL, "background", openInBackground, "args", nativeArgs)
+			slog.Debug("Would open natively (dry run)", "app", config.Name, "url", config.URL, "background", plan.background, "newInstance", plan.newInstance, "args", plan.args)
 			return nil
 		}
-		err := openNative(config.Name, config.AppType == "bundleId", config.URL, openInBackground, ok, nativeArgs, passURL)
+		err := openNative(config.Name, config.AppType == "bundleId", config.URL, plan.background, plan.newInstance, plan.args, plan.passURL)
 		if err == nil {
 			slog.Debug("Opened natively", "app", config.Name, "profileArgs", profileArgs)
 			return nil
@@ -185,6 +179,64 @@ func LaunchBrowser(config BrowserConfig, dryRun bool, openInBackgroundByDefault 
 	return nil
 }
 
+// launchPlan is a request that NSWorkspace can do without /usr/bin/open.
+type launchPlan struct {
+	args        []string // app arguments; empty when passURL is true
+	passURL     bool     // open the URL in the app (else launch it with args)
+	newInstance bool     // `open -n`
+	background  bool     // `open -g`
+}
+
+// nativePlan maps a launch request to NSWorkspace. It returns false when only
+// `open` can do it. It covers:
+//
+//   - no custom args: open the URL, or with a profile launch a new instance
+//     with "<profile args> <url>" (`open -n -a App --args <profile> <url>`);
+//   - custom args with no "--args": they are app arguments (`open` adds
+//     "--args" before them), with the profile arguments first;
+//   - custom args of the form [-n] [-g] --args <app args>, with no profile:
+//     the open flags become options. Any other open flag needs `open`.
+//
+// As with `open`, custom args replace the URL: the config gives it in args.
+func nativePlan(custom, profileArgs []string, hasProfile bool, url string, background bool) (launchPlan, bool) {
+	plan := launchPlan{background: background}
+
+	if len(custom) == 0 {
+		if hasProfile {
+			plan.args = append(append([]string{}, profileArgs...), url)
+			plan.newInstance = true
+			return plan, true
+		}
+		plan.passURL = true
+		return plan, true
+	}
+
+	sep := slices.Index(custom, "--args")
+	if sep < 0 {
+		plan.args = append(append([]string{}, profileArgs...), custom...)
+		plan.newInstance = hasProfile
+		return plan, true
+	}
+
+	if hasProfile {
+		// `open` puts the profile args before the custom "--args"; keep that
+		// exact behaviour by leaving it to `open`.
+		return launchPlan{}, false
+	}
+	for _, flag := range custom[:sep] {
+		switch flag {
+		case "-n":
+			plan.newInstance = true
+		case "-g":
+			plan.background = true
+		default:
+			return launchPlan{}, false
+		}
+	}
+	plan.args = append([]string{}, custom[sep+1:]...)
+	return plan, true
+}
+
 // knownBrowsers parses the embedded browsers.json once.
 var knownBrowsers = sync.OnceValue(func() []browserInfo {
 	var list []browserInfo
@@ -219,6 +271,16 @@ func resolveBrowserProfileArgs(identifier string, profile string) ([]string, boo
 			if ok {
 				return []string{"--profile-directory=" + profilePath}, true
 			}
+			// macOS can block the read of another app's data. A profile
+			// folder name ("Profile 3") is still safe to pass on; a display
+			// name is not: Chrome would make a new, empty profile with it.
+			if isBlocked(localStatePath) {
+				if chromiumProfileDirRe.MatchString(profile) {
+					slog.Debug("Profile list is blocked by macOS; using the profile folder name", "profile", profile)
+					return []string{"--profile-directory=" + profile}, true
+				}
+				slog.Warn("macOS blocks Finicky from reading the browser's profile list. Use the profile folder name (see chrome://version, \"Profile Path\"), for example \"Profile 1\", or allow Finicky in System Settings > Privacy & Security.", "browser", identifier, "profile", profile)
+			}
 		case "Firefox":
 			homeDir, err := util.UserHomeDir()
 			if err != nil {
@@ -230,6 +292,11 @@ func resolveBrowserProfileArgs(identifier string, profile string) ([]string, boo
 			profileName, ok := parseFirefoxProfiles(profilesIniPath, profile)
 			if ok {
 				return []string{"-P", profileName}, true
+			}
+			// Firefox takes a profile by name; when macOS blocks the list,
+			// pass the name on. An unknown name opens Firefox's profile manager.
+			if isBlocked(profilesIniPath) {
+				return []string{"-P", profile}, true
 			}
 		default:
 			slog.Info("Browser is not a supported browser type, skipping profile detection", "identifier", identifier)
@@ -374,32 +441,65 @@ func parseProfiles(localStatePath string, profile string) (string, bool) {
 	return "", false
 }
 
-// GetProfilesForBrowser returns available profile names for a given browser app name or bundle ID.
-// It knows the browsers in browsers.json and discovers other Chromium- and
-// Firefox-based browsers (see discover.go). Returns an empty slice when the
-// browser has no profile store or its profile file is unreadable.
-func GetProfilesForBrowser(identifier string) []string {
+// ProfileInfo describes the profiles of one browser for the settings window.
+type ProfileInfo struct {
+	Profiles []string `json:"profiles"`
+	// Supported is true for browsers whose profiles Finicky can select.
+	Supported bool `json:"supported"`
+	// Blocked is true when macOS refused the read of the profile list.
+	Blocked bool `json:"blocked"`
+}
+
+// chromiumProfileDirRe matches Chromium profile folder names.
+var chromiumProfileDirRe = regexp.MustCompile(`^(Default|Profile [0-9]+|Guest Profile|System Profile)$`)
+
+// isBlocked reports whether reading path fails for lack of permission, as it
+// does on recent macOS for another app's data.
+func isBlocked(path string) bool {
+	f, err := os.Open(path)
+	if err == nil {
+		f.Close()
+		return false
+	}
+	return errors.Is(err, fs.ErrPermission)
+}
+
+// GetProfileInfo returns the profiles of a browser (app name or bundle ID). It
+// knows the browsers in browsers.json and discovers other Chromium- and
+// Firefox-based browsers (see discover.go).
+func GetProfileInfo(identifier string) ProfileInfo {
+	info := ProfileInfo{Profiles: []string{}}
 	matchedBrowser := findBrowser(identifier)
 	if matchedBrowser == nil {
-		return []string{}
+		return info
 	}
 
 	homeDir, err := util.UserHomeDir()
 	if err != nil {
 		slog.Info("Error getting home directory", "error", err)
-		return []string{}
+		return info
 	}
 
+	var path string
 	switch matchedBrowser.Type {
 	case "Chromium":
-		localStatePath := filepath.Join(homeDir, "Library/Application Support", matchedBrowser.ConfigDirRelative, "Local State")
-		return getAllChromiumProfiles(localStatePath)
+		path = filepath.Join(homeDir, "Library/Application Support", matchedBrowser.ConfigDirRelative, "Local State")
+		info.Profiles = getAllChromiumProfiles(path)
 	case "Firefox":
-		profilesIniPath := filepath.Join(homeDir, "Library/Application Support", matchedBrowser.ConfigDirRelative, "profiles.ini")
-		return readFirefoxProfileNames(profilesIniPath)
+		path = filepath.Join(homeDir, "Library/Application Support", matchedBrowser.ConfigDirRelative, "profiles.ini")
+		info.Profiles = readFirefoxProfileNames(path)
 	default:
-		return []string{}
+		return info
 	}
+	info.Supported = true
+	info.Blocked = len(info.Profiles) == 0 && isBlocked(path)
+	return info
+}
+
+// GetProfilesForBrowser returns the profile names of a browser, or an empty
+// slice when there are none or they cannot be read.
+func GetProfilesForBrowser(identifier string) []string {
+	return GetProfileInfo(identifier).Profiles
 }
 
 // formatCommand returns a properly shell-escaped string representation of the command

@@ -1,5 +1,6 @@
 <script lang="ts">
   import XIcon from "./icons/X.svelte";
+  import type { ProfileStatus } from "../types";
   const CUSTOM = "__custom__";
 
   let {
@@ -9,6 +10,7 @@
     isProfileCustom,
     installedBrowsers = [],
     profilesByBrowser = {},
+    profileStatus = {},
     disabled = false,
     required = false,
     browserPlaceholder = "Select browser",
@@ -26,6 +28,7 @@
     isProfileCustom: boolean;
     installedBrowsers: string[];
     profilesByBrowser: Record<string, string[]>;
+    profileStatus?: Record<string, ProfileStatus>;
     disabled?: boolean;
     required?: boolean;
     browserPlaceholder?: string;
@@ -43,6 +46,14 @@
   function profileOptions(b: string): string[] {
     return profilesByBrowser[b] ?? [];
   }
+
+  // The browser has profiles, but the app cannot list them (macOS blocks the
+  // read): the profile is typed, as a folder name such as "Profile 1".
+  const status = $derived(profileStatus[browser]);
+  const typedProfile = $derived(
+    !isCustom && !!browser && profileOptions(browser).length === 0 && !!status?.supported
+  );
+  const hintId = `profile-hint-${Math.random().toString(36).slice(2, 9)}`;
 
   function handleBrowserSelect(e: Event) {
     const val = (e.target as HTMLSelectElement).value;
@@ -126,7 +137,19 @@
     </div>
   {/if}
 
-  {#if !isCustom && browser && profileOptions(browser).length > 0}
+  {#if typedProfile}
+    <input
+      class="browser-input profile-input"
+      type="text"
+      placeholder="Any profile"
+      aria-label="{label}: profile folder"
+      aria-describedby={status?.blocked ? hintId : undefined}
+      value={profile}
+      oninput={handleProfileInput}
+      onblur={() => onSave?.()}
+      {disabled}
+    />
+  {:else if !isCustom && browser && profileOptions(browser).length > 0}
     {#if isProfileCustom}
       <input
         class="browser-input"
@@ -159,7 +182,31 @@
   {/if}
 </div>
 
+{#if typedProfile && status?.blocked}
+  <p class="profile-hint" id={hintId}>
+    macOS does not let Finicky read this browser's profile list. Type the profile folder, for example
+    <code>Profile 1</code>: open <code>chrome://version</code> in that profile and look at “Profile Path”.
+  </p>
+{/if}
+
 <style>
+  .profile-input {
+    flex: 1 1 12ch;
+    max-width: 18ch;
+  }
+
+  .profile-hint {
+    margin: 6px 0 0;
+    color: var(--text-secondary);
+    font-size: 0.8em;
+    line-height: 1.45;
+  }
+
+  .profile-hint code {
+    font-family: var(--font-mono);
+    font-size: 0.95em;
+  }
+
   .browser-select-row {
     display: flex;
     gap: 8px;
